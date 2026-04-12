@@ -108,6 +108,12 @@ class SkeletonRenderer:
         if self._program is None or self._n_nodes == 0:
             return
 
+        from OpenGL.GL import (
+            glEnable, glDisable, glDepthFunc, glGetIntegerv,
+            GL_DEPTH_FUNC, GL_LEQUAL, GL_BLEND, glBlendFunc,
+            GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+        )
+
         glUseProgram(self._program)
 
         loc_mvp    = glGetUniformLocation(self._program, 'u_mvp')
@@ -116,6 +122,15 @@ class SkeletonRenderer:
         loc_round  = glGetUniformLocation(self._program, 'u_round_points')
 
         glUniformMatrix4fv(loc_mvp, 1, True, mvp)
+
+        # Enable blending for the AA edges/nodes
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        # Use LEQUAL so that skeleton points at the exact same position as
+        # PCD points (common when extracted from them) are still visible.
+        old_depth_func = glGetIntegerv(GL_DEPTH_FUNC)
+        glDepthFunc(GL_LEQUAL)
 
         # Draw edges (GL_LINES) — u_round_points=0 so the discard is skipped
         if self._n_edge_indices > 0:
@@ -138,6 +153,9 @@ class SkeletonRenderer:
         glBindVertexArray(self._vao_nodes)
         glDrawArrays(GL_POINTS, 0, self._n_nodes)
         glBindVertexArray(0)
+
+        glDepthFunc(old_depth_func)
+        glDisable(GL_BLEND)
 
     def clear(self) -> None:
         """Hide the skeleton overlay (zeroes draw counts; GPU buffers remain)."""

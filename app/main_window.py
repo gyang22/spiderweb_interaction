@@ -21,7 +21,7 @@ from app.commands.color_command import ColorCommand
 from app.data.pcd_io import load_pcd, save_pcd
 from app.data.ply_export import export_ply
 from app.data.strand_graph import extract_skeleton, merge_graphs, StrandGraph
-from app.data.graph_io import export_graph_json
+from app.data.graph_io import export_graph_json, import_graph_json
 from app.data.downsample import voxel_downsample
 from app.data.align import icp_align, cpd_align, euler_to_transform
 from app.data.point_cloud import PointCloud
@@ -142,6 +142,10 @@ class MainWindow(QMainWindow):
         act_export_graph = QAction("Export Skeleton &JSON…", self)
         act_export_graph.triggered.connect(self._export_graph)
         file_menu.addAction(act_export_graph)
+
+        act_import_graph = QAction("&Import Skeleton JSON…", self)
+        act_import_graph.triggered.connect(self._import_graph)
+        file_menu.addAction(act_import_graph)
 
         file_menu.addSeparator()
         act_quit = QAction("&Quit", self)
@@ -349,6 +353,31 @@ class MainWindow(QMainWindow):
             export_graph_json(self._skeleton, path)
         except Exception as exc:
             QMessageBox.critical(self, "Export error", str(exc))
+
+    def _import_graph(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Skeleton JSON", str(settings.SAVES_DIR), "JSON file (*.json);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            graph = import_graph_json(path)
+            print(f"Imported graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
+            if len(graph.nodes) > 0:
+                mins = graph.nodes.min(axis=0)
+                maxs = graph.nodes.max(axis=0)
+                print(f"Graph bounding box: min={mins}, max={maxs}")
+            
+            # Accumulate: merge new graph onto whatever was already extracted/imported
+            if self._skeleton is not None:
+                graph = merge_graphs(self._skeleton, graph)
+            self._skeleton = graph
+            self._viewport.set_skeleton(graph)
+            self._graph_panel.set_stats(len(graph.nodes), len(graph.edges))
+        except Exception as exc:
+            QMessageBox.critical(self, "Import error", str(exc))
+            import traceback
+            traceback.print_exc()
 
     def _clear_skeleton(self) -> None:
         self._skeleton = None
