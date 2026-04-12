@@ -2,7 +2,7 @@
 
 run python3 main.py
 
-# json_graphs branch
+# json_graphs branch (merged)
 First, create a graph using PCD Graph Recon DM.
 Then convert the graph to json format.
 ```python
