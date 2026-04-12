@@ -3,6 +3,13 @@
 import numpy as np
 from pathlib import Path
 
+import open3d as o3d
+try:
+    from pcd_graph_recon import generate_graph
+    _HAS_GRAPH_RECON = True
+except ImportError:
+    _HAS_GRAPH_RECON = False
+
 from PyQt6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QProgressDialog,
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QComboBox,
@@ -44,6 +51,35 @@ class _LoadWorker(QObject):
         try:
             pc = load_pcd(self._path)
             self.finished.emit(pc)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class _GraphWorker(QObject):
+    finished = pyqtSignal(object)   # StrandGraph
+    error = pyqtSignal(str)
+
+    def __init__(self, pcd, tau_detour, keep_tau, voxel_size, persistence_threshold):
+        super().__init__()
+        self._pcd = pcd
+        self._tau_detour = tau_detour
+        self._keep_tau = keep_tau
+        self._voxel_size = voxel_size
+        self._persistence_threshold = persistence_threshold
+
+    def run(self) -> None:
+        try:
+            graph_results = generate_graph(
+                pcd=self._pcd,
+                tau_detour=self._tau_detour,
+                keep_tau=self._keep_tau,
+                voxel_size=self._voxel_size,
+                persistence_threshold=self._persistence_threshold
+            )
+            nodes = np.array(graph_results['nodes'], dtype=np.float32)
+            edges = np.array(graph_results['edges'], dtype=np.int32)
+            graph = StrandGraph(nodes=nodes, edges=edges)
+            self.finished.emit(graph)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -102,6 +138,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._graph_panel)
         self._graph_panel.downsample_clicked.connect(self._downsample_cloud)
         self._graph_panel.extract_clicked.connect(self._extract_skeleton)
+        self._graph_panel.extract_intelligent_clicked.connect(self._extract_intelligent_skeleton)
         self._graph_panel.export_clicked.connect(self._export_graph)
         self._graph_panel.clear_clicked.connect(self._clear_skeleton)
 
@@ -381,6 +418,74 @@ class MainWindow(QMainWindow):
         self._viewport.set_skeleton(graph)
         self._graph_panel.set_stats(len(graph.nodes), len(graph.edges))
 
+    def _extract_intelligent_skeleton(self) -> None:
+        if not _HAS_GRAPH_RECON:
+            QMessageBox.critical(self, "Missing Dependency", "pcd_graph_recon is not installed.")
+            return
+
+        if self._pc is None:
+            return
+        indices = self._pc.selected_alive_indices()
+        if len(indices) == 0:
+            QMessageBox.warning(self, "No selection",
+                                "Select a region of the point cloud first.")
+            return
+        if len(indices) < 2:
+            QMessageBox.warning(self, "Too few points",
+                                "Select at least 2 points to extract a skeleton.")
+            return
+
+        positions = self._pc.positions[indices]
+        colors = self._pc.colors[indices] if self._pc.colors is not None else None
+
+        o3d_pc = o3d.geometry.PointCloud()
+        o3d_pc.points = o3d.utility.Vector3dVector(positions.astype(np.float64))
+        if colors is not None:
+            # open3d expects (N, 3) for colors, but PointCloud stores (N, 4) RGBA
+            o3d_pc.colors = o3d.utility.Vector3dVector(colors[:, :3].astype(np.float64))
+
+        voxel_size = self._graph_panel.get_voxel_size()   # None = auto
+        tau_detour = self._graph_panel.get_tau_detour()
+        keep_tau = self._graph_panel.get_keep_tau()
+        persist_thresh = self._graph_panel.get_persistence_threshold()
+
+        progress = QProgressDialog("Generating intelligent skeleton…", None, 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+        progress.show()
+        QApplication.processEvents()
+
+        self._graph_thread = QThread()
+        self._graph_worker = _GraphWorker(
+            o3d_pc, tau_detour, keep_tau, voxel_size, persist_thresh
+        )
+        self._graph_worker.moveToThread(self._graph_thread)
+
+        self._graph_thread.started.connect(self._graph_worker.run)
+        self._graph_worker.finished.connect(self._on_graph_finished)
+        self._graph_worker.error.connect(self._on_graph_error)
+        self._graph_worker.finished.connect(self._graph_thread.quit)
+        self._graph_worker.error.connect(self._graph_thread.quit)
+        self._graph_thread.finished.connect(progress.close)
+
+        self._graph_thread.start()
+
+    def _on_graph_finished(self, graph) -> None:
+        # Accumulate: merge new graph onto whatever was already extracted
+        if self._skeleton is not None:
+            graph = merge_graphs(self._skeleton, graph)
+        self._skeleton = graph
+        self._viewport.set_skeleton(graph)
+        self._graph_panel.set_stats(len(graph.nodes), len(graph.edges))
+        self._graph_thread.deleteLater()
+        self._graph_thread = None
+
+    def _on_graph_error(self, msg: str) -> None:
+        QMessageBox.critical(self, "Extraction error", f"pcd_graph_recon failed:\n{msg}")
+        if self._graph_thread:
+            self._graph_thread.deleteLater()
+            self._graph_thread = None
+
     def _export_graph(self) -> None:
         if self._skeleton is None:
             QMessageBox.information(self, "No skeleton",
@@ -640,7 +745,10 @@ class MainWindow(QMainWindow):
         cmd = ReplaceCloudCommand(old_primary, merged_pc, self._apply_active_cloud, "merge")
         self._undo_stack.push(cmd)
 
-    # ── Edit actions ──────────────────────────────────────────────────────────
+    def _apply_skeleton_from_command(self, skeleton) -> None:
+        self._skeleton = skeleton
+        self._viewport.set_skeleton(skeleton)
+        self._graph_panel.set_stats(len(skeleton.nodes), len(skeleton.edges))
 
     def _delete_selected(self) -> None:
         if self._pc is None:
@@ -648,7 +756,44 @@ class MainWindow(QMainWindow):
         indices = self._pc.selected_alive_indices()
         if len(indices) == 0:
             return
-        cmd = DeleteCommand(self._pc, indices)
+
+        old_skeleton = self._skeleton
+        new_skeleton = self._skeleton
+        
+        if self._skeleton is not None and len(self._skeleton.nodes) > 0:
+            try:
+                from sklearn.neighbors import KDTree
+                alive_idx = np.where(self._pc.alive_mask)[0]
+                alive_pos = self._pc.positions[alive_idx]
+                tree = KDTree(alive_pos)
+                _, closest_local_idx = tree.query(self._skeleton.nodes, k=1)
+                closest_global_idx = alive_idx[closest_local_idx.flatten()]
+                
+                deleted_set = set(indices.tolist())
+                keep_node_mask = np.array([idx not in deleted_set for idx in closest_global_idx], dtype=bool)
+                
+                if not keep_node_mask.all():
+                    kept_indices = np.where(keep_node_mask)[0]
+                    if len(kept_indices) == 0:
+                        new_skeleton = StrandGraph(np.empty((0,3), dtype=np.float32), np.empty((0,2), dtype=np.int32))
+                    else:
+                        remap = {old: new for new, old in enumerate(kept_indices)}
+                        nodes_out = self._skeleton.nodes[kept_indices]
+                        edges_out_list = []
+                        for u, v in self._skeleton.edges:
+                            if u in remap and v in remap:
+                                edges_out_list.append((remap[u], remap[v]))
+                        edges_out = np.array(edges_out_list, dtype=np.int32) if edges_out_list else np.empty((0,2), dtype=np.int32)
+                        new_skeleton = StrandGraph(nodes=nodes_out, edges=edges_out)
+            except Exception as exc:
+                print("Could not prune skeleton", exc)
+
+        cmd = DeleteCommand(
+            self._pc, indices, 
+            old_skeleton=old_skeleton, 
+            new_skeleton=new_skeleton, 
+            apply_skeleton_func=self._apply_skeleton_from_command
+        )
         self._undo_stack.push(cmd)
         self._viewport.on_alive_changed()
 
@@ -748,6 +893,9 @@ class MainWindow(QMainWindow):
                 return True          # consume — prevent Qt focus-tab navigation
             if key in (int(Qt.Key.Key_Delete), int(Qt.Key.Key_Q)):
                 self._delete_selected()
+                return True
+            if key == int(Qt.Key.Key_G):
+                self._extract_skeleton()
                 return True
             if key == int(Qt.Key.Key_Home):
                 self._viewport.reset_camera()

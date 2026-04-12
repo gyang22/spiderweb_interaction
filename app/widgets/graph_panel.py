@@ -16,6 +16,7 @@ class GraphPanel(QDockWidget):
 
     # Skeleton
     extract_clicked = pyqtSignal()
+    extract_intelligent_clicked = pyqtSignal()
     export_clicked  = pyqtSignal()
     clear_clicked   = pyqtSignal()
 
@@ -157,6 +158,52 @@ class GraphPanel(QDockWidget):
         skel_layout.addWidget(self._btn_clear)
 
         layout.addWidget(skel_group)
+
+        # ══ Intelligent Skeleton (pcd_graph_recon) ════════════════════════════
+        intel_group = QGroupBox("Intelligent Skeleton (pcd_graph_recon)")
+        intel_layout = QVBoxLayout(intel_group)
+        intel_layout.setSpacing(6)
+
+        tau_row = QHBoxLayout()
+        tau_row.addWidget(QLabel("Tau detour:"))
+        self._spin_tau_detour = QDoubleSpinBox()
+        self._spin_tau_detour.setRange(0.0, 10.0)
+        self._spin_tau_detour.setDecimals(2)
+        self._spin_tau_detour.setValue(1.5)
+        self._spin_tau_detour.setToolTip("Tau detour parameter.")
+        tau_row.addWidget(self._spin_tau_detour)
+        intel_layout.addLayout(tau_row)
+
+        keep_row = QHBoxLayout()
+        keep_row.addWidget(QLabel("Keep tau:"))
+        self._spin_keep_tau = QDoubleSpinBox()
+        self._spin_keep_tau.setRange(0.0, 10.0)
+        self._spin_keep_tau.setDecimals(2)
+        self._spin_keep_tau.setValue(0.5)
+        self._spin_keep_tau.setToolTip("Keep tau parameter.")
+        keep_row.addWidget(self._spin_keep_tau)
+        intel_layout.addLayout(keep_row)
+
+        persist_row = QHBoxLayout()
+        persist_row.addWidget(QLabel("Persistence threshold:"))
+        self._spin_persist = QDoubleSpinBox()
+        self._spin_persist.setRange(0.0, 1.0)
+        self._spin_persist.setDecimals(3)
+        self._spin_persist.setValue(0.99)
+        self._spin_persist.setToolTip("Persistence threshold.")
+        persist_row.addWidget(self._spin_persist)
+        intel_layout.addLayout(persist_row)
+
+        self._btn_intel_extract = QPushButton("Intelligent Extract")
+        self._btn_intel_extract.setFixedHeight(34)
+        self._btn_intel_extract.setToolTip(
+            "Systematically generate an intelligent skeleton using pcd_graph_recon.\n"
+            "This will use the voxel size from the auto/spinbox above."
+        )
+        self._btn_intel_extract.clicked.connect(self.extract_intelligent_clicked)
+        intel_layout.addWidget(self._btn_intel_extract)
+
+        layout.addWidget(intel_group)
         layout.addStretch()
         self.setWidget(root)
 
@@ -192,6 +239,15 @@ class GraphPanel(QDockWidget):
 
     def get_prune_factor(self) -> float:
         return self._spin_prune.value()
+
+    def get_tau_detour(self) -> float:
+        return self._spin_tau_detour.value()
+
+    def get_keep_tau(self) -> float:
+        return self._spin_keep_tau.value()
+
+    def get_persistence_threshold(self) -> float:
+        return self._spin_persist.value()
 
     # ── private ───────────────────────────────────────────────────────────────
 

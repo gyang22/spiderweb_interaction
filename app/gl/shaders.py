@@ -38,7 +38,12 @@ void main() {
         return;
     }
 
-    gl_Position = u_mvp * vec4(a_position, 1.0);
+    vec4 pos = u_mvp * vec4(a_position, 1.0);
+    // Pulses selected points forward by 0.002 to beat skeleton on depth
+    if (a_selected > 0.5) {
+        pos.z -= 0.002 * pos.w;
+    }
+    gl_Position = pos;
     gl_PointSize = u_point_size;
     v_color = (a_selected > 0.5) ? u_selection_color : a_color;
 }
@@ -114,7 +119,10 @@ uniform mat4  u_mvp;
 uniform float u_point_size;
 
 void main() {
-    gl_Position  = u_mvp * vec4(a_position, 1.0);
+    vec4 pos = u_mvp * vec4(a_position, 1.0);
+    // Pulls skeleton forward by 0.001 to render above unselected points, but behind selected points (which are 0.002)
+    pos.z -= 0.001 * pos.w;
+    gl_Position  = pos;
     gl_PointSize = u_point_size;
 }
 """
