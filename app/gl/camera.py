@@ -12,7 +12,7 @@ _K_A     = int(Qt.Key.Key_A)
 _K_S     = int(Qt.Key.Key_S)
 _K_D     = int(Qt.Key.Key_D)
 _K_SPACE = int(Qt.Key.Key_Space)
-_K_CTRL  = int(Qt.Key.Key_Control)
+_K_SHIFT = int(Qt.Key.Key_Shift)
 
 
 class FlyCamera:
@@ -94,7 +94,7 @@ class FlyCamera:
         if _K_A     in self._held_keys: desired -= right
         if _K_D     in self._held_keys: desired += right
         if _K_SPACE in self._held_keys: desired[1] += 1.0
-        if _K_CTRL  in self._held_keys: desired[1] -= 1.0
+        if _K_SHIFT in self._held_keys: desired[1] -= 1.0
 
         norm = np.linalg.norm(desired)
         if norm > 1e-6:

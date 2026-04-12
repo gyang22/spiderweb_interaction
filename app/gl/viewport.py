@@ -172,40 +172,67 @@ class GLViewport(QOpenGLWidget):
             self.skeleton_renderer.clear()
         self.update()
 
-    def load_secondary(self, pc) -> None:
-        """
-        Load a secondary point cloud (shown in blue overlay).
+    def reload_point_cloud(self, pc) -> None:
+        """Re-upload a point cloud to GPU without resetting the camera or tools."""
+        self.point_cloud = pc
+        self.makeCurrent()
+        self.renderer.load(pc)
+        self.doneCurrent()
+        self.update()
 
-        Creates a blue-tinted copy of the cloud; the original colors are not
-        preserved in the overlay (the user can see them in the primary after merge).
+    def load_reference(self, pc, transform: np.ndarray | None = None) -> None:
+        """
+        Load a cloud into the reference overlay renderer (dim tint, non-interactive).
+
+        `transform` is the 4×4 model transform to apply when drawing this overlay
+        (default identity).  Pass the alignment transform here so the reference
+        shows where the secondary *would* land relative to the primary.
         """
         if self._secondary_renderer is None:
             return
         from app.data.point_cloud import PointCloud
 
-        n = pc.positions[pc.alive_mask].shape[0]
-        positions = pc.positions[pc.alive_mask].copy()
-        # Uniform blue-ish tint so secondary is clearly distinguishable
-        colors = np.tile([0.35, 0.65, 1.0, 0.80], (n, 1)).astype(np.float32)
+        alive_mask = pc.alive_mask
+        positions  = pc.positions[alive_mask].copy()
+        # Original colors, dimmed and slightly desaturated so it reads as "inactive"
+        orig_colors = pc.colors[alive_mask].copy()
+        # Blend toward a neutral blue-grey to signal "not the active cloud"
+        tint   = np.array([0.35, 0.55, 0.75, 0.55], dtype=np.float32)
+        colors = orig_colors * 0.45 + tint * 0.55
+        colors[:, 3] = 0.55        # fixed alpha for clarity
+        colors = np.clip(colors, 0.0, 1.0).astype(np.float32)
+
         tinted = PointCloud(positions, colors)
 
         self.makeCurrent()
         self._secondary_renderer.load(tinted)
-        self._secondary_transform = np.eye(4, dtype=np.float32)
+        self._secondary_transform = np.asarray(
+            transform if transform is not None else np.eye(4), dtype=np.float32
+        )
         self.doneCurrent()
         self.update()
 
-    def update_secondary_transform(self, T: np.ndarray) -> None:
-        """Set the 4×4 model transform applied to the secondary cloud."""
+    def update_reference_transform(self, T: np.ndarray) -> None:
+        """Set the 4×4 model transform applied to the reference overlay cloud."""
         self._secondary_transform = np.asarray(T, dtype=np.float32)
         self.update()
 
-    def clear_secondary(self) -> None:
-        """Remove the secondary cloud overlay."""
+    def clear_reference(self) -> None:
+        """Remove the reference overlay."""
         if self._secondary_renderer:
             self._secondary_renderer.clear()
         self._secondary_transform = np.eye(4, dtype=np.float32)
         self.update()
+
+    # Keep legacy names as thin aliases so nothing else breaks during transition
+    def load_secondary(self, pc) -> None:
+        self.load_reference(pc)
+
+    def update_secondary_transform(self, T: np.ndarray) -> None:
+        self.update_reference_transform(T)
+
+    def clear_secondary(self) -> None:
+        self.clear_reference()
 
     # ── FPS mode ──────────────────────────────────────────────────────────────
 
@@ -433,7 +460,7 @@ class GLViewport(QOpenGLWidget):
     _CAM_KEYS = frozenset([
         int(Qt.Key.Key_W), int(Qt.Key.Key_A),
         int(Qt.Key.Key_S), int(Qt.Key.Key_D),
-        int(Qt.Key.Key_Space), int(Qt.Key.Key_Control),
+        int(Qt.Key.Key_Space), int(Qt.Key.Key_Shift),
     ])
 
     def keyPressEvent(self, event) -> None:

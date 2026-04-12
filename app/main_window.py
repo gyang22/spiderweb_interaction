@@ -25,6 +25,7 @@ from app.data.graph_io import export_graph_json
 from app.data.downsample import voxel_downsample
 from app.data.align import icp_align, cpd_align, euler_to_transform
 from app.data.point_cloud import PointCloud
+from app.commands.replace_cloud_command import ReplaceCloudCommand
 from app.widgets.pcd_selector import PcdSelectorDialog
 from app import settings
 
@@ -58,11 +59,19 @@ class MainWindow(QMainWindow):
         # Ensure the saves directory exists (all writes go here by default)
         settings.SAVES_DIR.mkdir(parents=True, exist_ok=True)
 
-        self._pc = None
+        # Active cloud — all tools always operate on self._pc
+        self._pc: PointCloud | None = None
+
+        # Two-cloud state for the merge workflow
+        self._pc_primary:   PointCloud | None = None   # first-loaded web
+        self._pc_secondary: PointCloud | None = None   # second-loaded web
+        self._editing_secondary: bool = False           # True = secondary is active
+
+        # Alignment transform for the secondary cloud (updated by ICP / manual controls).
+        # Always expressed relative to secondary's own coordinate system.
+        self._secondary_alignment_T: np.ndarray = np.eye(4, dtype=np.float32)
+
         self._skeleton: StrandGraph | None = None
-        self._secondary_pc: PointCloud | None = None
-        # Base transform set by ICP; manual spinbox delta is composed on top of this
-        self._secondary_base_transform: np.ndarray = np.eye(4, dtype=np.float32)
         self._undo_stack = UndoStack(self)
         self._undo_stack.changed.connect(self._on_command_executed)
 
@@ -102,6 +111,7 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self._graph_panel, self._merge_panel)
         self._merge_panel.load_secondary_clicked.connect(self._load_secondary_pcd)
         self._merge_panel.clear_secondary_clicked.connect(self._clear_secondary)
+        self._merge_panel.switch_active_clicked.connect(self._switch_active_cloud)
         self._merge_panel.run_icp_clicked.connect(self._run_icp)
         self._merge_panel.run_cpd_clicked.connect(self._run_cpd)
         self._merge_panel.merge_clicked.connect(self._merge_clouds)
@@ -221,6 +231,8 @@ class MainWindow(QMainWindow):
 
     def _on_load_finished(self, pc) -> None:
         self._pc = pc
+        self._pc_primary = pc
+        self._editing_secondary = False
         self._viewport.load_point_cloud(pc)
         self._undo_stack._undo.clear()
         self._undo_stack._redo.clear()
@@ -230,10 +242,10 @@ class MainWindow(QMainWindow):
         self._skeleton = None
         self._viewport.clear_skeleton()
         self._graph_panel.clear_stats()
-        # Clear secondary cloud if a new primary is loaded
-        self._secondary_pc = None
-        self._secondary_base_transform = np.eye(4, dtype=np.float32)
-        self._viewport.clear_secondary()
+        # Clear secondary cloud whenever a fresh primary is loaded
+        self._pc_secondary = None
+        self._secondary_alignment_T = np.eye(4, dtype=np.float32)
+        self._viewport.clear_reference()
         self._merge_panel.clear_secondary_status()
         self._viewport.setFocus()   # give viewport focus so WASD works immediately
 
@@ -266,6 +278,32 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Export error", str(exc))
 
+    # ── Active-cloud helpers ──────────────────────────────────────────────────
+
+    def _apply_active_cloud(self, pc: PointCloud) -> None:
+        """
+        Swap `pc` in as the active cloud (self._pc + the correct primary/secondary
+        slot) and reload the viewport renderer.  Used by ReplaceCloudCommand.
+        """
+        self._pc = pc
+        if self._editing_secondary:
+            self._pc_secondary = pc
+        else:
+            self._pc_primary = pc
+        self._viewport.reload_point_cloud(pc)
+        self._status.update_point_cloud(pc)
+        # Update reference overlay to reflect the now-active cloud's counterpart
+        self._refresh_reference_overlay()
+
+    def _refresh_reference_overlay(self) -> None:
+        """Reload the reference overlay to match the current two-cloud state."""
+        if self._editing_secondary and self._pc_primary is not None:
+            self._viewport.load_reference(self._pc_primary, transform=None)
+        elif not self._editing_secondary and self._pc_secondary is not None:
+            self._viewport.load_reference(
+                self._pc_secondary, transform=self._secondary_alignment_T
+            )
+
     # ── Downsample action ─────────────────────────────────────────────────────
 
     def _downsample_cloud(self) -> None:
@@ -287,7 +325,11 @@ class MainWindow(QMainWindow):
 
         n_after = new_pc.alive_count
         self._graph_panel.set_ds_stats(n_before, n_after)
-        self._on_load_finished(new_pc)
+
+        old_pc = self._pc
+        cmd = ReplaceCloudCommand(old_pc, new_pc, self._apply_active_cloud, "downsample")
+        self._undo_stack.push(cmd)
+        self._graph_panel.set_ds_stats(n_before, n_after)
 
     # ── Skeleton actions ──────────────────────────────────────────────────────
 
@@ -359,7 +401,6 @@ class MainWindow(QMainWindow):
 
     def _load_secondary_pcd(self) -> None:
         """Open the PCD selector to pick a secondary cloud for alignment."""
-        from app.widgets.pcd_selector import PcdSelectorDialog
         dlg = PcdSelectorDialog(self)
         if dlg.exec() != PcdSelectorDialog.DialogCode.Accepted:
             return
@@ -371,43 +412,99 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load error", f"Failed to load secondary PCD:\n{exc}")
             return
 
-        self._secondary_pc = pc
-        self._secondary_base_transform = np.eye(4, dtype=np.float32)
+        self._pc_secondary = pc
+        self._secondary_alignment_T = np.eye(4, dtype=np.float32)
+
+        # Make the secondary the active cloud so the user can edit it immediately
+        self._editing_secondary = True
+        self._pc = self._pc_secondary
+        self._viewport.reload_point_cloud(self._pc_secondary)
+
+        # Primary becomes the reference overlay
+        if self._pc_primary is not None:
+            self._viewport.load_reference(self._pc_primary, transform=None)
+
+        self._undo_stack._undo.clear()
+        self._undo_stack._redo.clear()
+        self._update_undo_actions()
+        self._status.update_point_cloud(self._pc)
+
         self._merge_panel.reset_transform_spinboxes()
         self._merge_panel.set_secondary_loaded(dlg.selected_path.name, pc.alive_count)
-        self._viewport.load_secondary(pc)
+        self._merge_panel.set_editing_state(editing_secondary=True)
+        self._viewport.setFocus()
+
+    def _switch_active_cloud(self) -> None:
+        """Toggle which cloud (primary / secondary) is currently being edited."""
+        if self._pc_secondary is None:
+            return
+
+        self._editing_secondary = not self._editing_secondary
+
+        if self._editing_secondary:
+            # Secondary → active; primary → reference overlay (no transform)
+            self._pc = self._pc_secondary
+            self._viewport.reload_point_cloud(self._pc_secondary)
+            if self._pc_primary is not None:
+                self._viewport.load_reference(self._pc_primary, transform=None)
+        else:
+            # Primary → active; secondary → reference overlay (with alignment transform)
+            self._pc = self._pc_primary
+            self._viewport.reload_point_cloud(self._pc_primary)
+            self._viewport.load_reference(
+                self._pc_secondary, transform=self._secondary_alignment_T
+            )
+
+        # Clear undo history — history from the other cloud isn't applicable
+        self._undo_stack._undo.clear()
+        self._undo_stack._redo.clear()
+        self._update_undo_actions()
+        self._status.update_point_cloud(self._pc)
+        self._merge_panel.set_editing_state(self._editing_secondary)
+        self._viewport.setFocus()
 
     def _clear_secondary(self) -> None:
-        self._secondary_pc = None
-        self._secondary_base_transform = np.eye(4, dtype=np.float32)
+        self._pc_secondary = None
+        self._secondary_alignment_T = np.eye(4, dtype=np.float32)
+
+        # If we were editing the secondary, switch back to primary
+        if self._editing_secondary and self._pc_primary is not None:
+            self._editing_secondary = False
+            self._pc = self._pc_primary
+            self._viewport.reload_point_cloud(self._pc_primary)
+            self._undo_stack._undo.clear()
+            self._undo_stack._redo.clear()
+            self._update_undo_actions()
+            self._status.update_point_cloud(self._pc)
+
+        self._viewport.clear_reference()
         self._merge_panel.clear_secondary_status()
-        self._viewport.clear_secondary()
 
     def _on_manual_transform_changed(
         self, tx: float, ty: float, tz: float,
         yaw: float, pitch: float, roll: float
     ) -> None:
         """
-        Compose the manual (spinbox) adjustment on top of the ICP base transform.
-
-        Total transform = _secondary_base_transform @ manual_delta
+        Compose the manual spinbox delta on top of the ICP base transform.
+        Total = _secondary_alignment_T @ manual_delta.
         """
-        if self._secondary_pc is None:
+        if self._pc_secondary is None:
             return
-        # Rotation center = secondary cloud centroid (alive points)
-        alive_pos = self._secondary_pc.positions[self._secondary_pc.alive_mask]
+        alive_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
         center = alive_pos.mean(axis=0)
         manual_delta = euler_to_transform(tx, ty, tz, yaw, pitch, roll, center=center)
-        total = (self._secondary_base_transform @ manual_delta).astype(np.float32)
-        self._viewport.update_secondary_transform(total)
+        total = (self._secondary_alignment_T @ manual_delta).astype(np.float32)
+        # Only affects the reference overlay (secondary is the reference when
+        # editing primary, or when the transform controls are being used)
+        self._viewport.update_reference_transform(total)
 
     def _run_icp(self) -> None:
         """Run rigid ICP to align secondary cloud to primary."""
-        if self._pc is None or self._secondary_pc is None:
+        if self._pc_primary is None or self._pc_secondary is None:
             return
 
-        primary_pos = self._pc.positions[self._pc.alive_mask]
-        secondary_pos = self._secondary_pc.positions[self._secondary_pc.alive_mask]
+        primary_pos   = self._pc_primary.positions[self._pc_primary.alive_mask]
+        secondary_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
 
         max_iter = self._merge_panel.get_icp_max_iter()
 
@@ -415,43 +512,44 @@ class MainWindow(QMainWindow):
             T, rmse, n_inliers = icp_align(
                 source=secondary_pos,
                 target=primary_pos,
-                init_transform=self._secondary_base_transform,
+                init_transform=self._secondary_alignment_T,
                 max_iter=max_iter,
             )
         except Exception as exc:
             QMessageBox.critical(self, "ICP error", str(exc))
             return
 
-        self._secondary_base_transform = T
-        # Reset manual spinboxes — the ICP result IS the new base
+        self._secondary_alignment_T = T
         self._merge_panel.reset_transform_spinboxes()
         self._merge_panel.set_icp_result(rmse, n_inliers)
-        self._viewport.update_secondary_transform(T)
+
+        # Show aligned secondary as overlay; switch view to primary so the
+        # alignment result is immediately visible
+        if self._editing_secondary:
+            self._switch_active_cloud()   # → primary active, secondary as aligned overlay
+        else:
+            self._viewport.update_reference_transform(T)
 
     def _run_cpd(self) -> None:
         """Run non-rigid CPD to warp the secondary cloud to the primary."""
-        if self._pc is None or self._secondary_pc is None:
+        if self._pc_primary is None or self._pc_secondary is None:
             return
 
-        primary_pos = self._pc.positions[self._pc.alive_mask]
-        secondary_pos = self._secondary_pc.positions[self._secondary_pc.alive_mask]
+        primary_pos   = self._pc_primary.positions[self._pc_primary.alive_mask]
+        secondary_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
 
-        # Apply current base transform to secondary positions first
-        base_T = self._secondary_base_transform.astype(np.float64)
-        ones = np.ones((len(secondary_pos), 1), dtype=np.float64)
+        # Apply current alignment transform to secondary before CPD
+        T = self._secondary_alignment_T.astype(np.float64)
+        ones  = np.ones((len(secondary_pos), 1), dtype=np.float64)
         sec_h = np.concatenate([secondary_pos.astype(np.float64), ones], axis=1)
-        aligned_pos = (base_T @ sec_h.T).T[:, :3].astype(np.float32)
+        aligned_pos = (T @ sec_h.T).T[:, :3].astype(np.float32)
 
         alpha = self._merge_panel.get_cpd_alpha()
         self._merge_panel.set_cpd_status("Running CPD…")
         QApplication.processEvents()
 
         try:
-            warped = cpd_align(
-                source=aligned_pos,
-                target=primary_pos,
-                alpha=alpha,
-            )
+            warped = cpd_align(source=aligned_pos, target=primary_pos, alpha=alpha)
         except ImportError as exc:
             QMessageBox.critical(self, "pycpd missing", str(exc))
             self._merge_panel.set_cpd_status("pycpd not installed")
@@ -461,42 +559,57 @@ class MainWindow(QMainWindow):
             self._merge_panel.set_cpd_status("CPD failed")
             return
 
-        # Replace secondary cloud with the warped geometry; reset transform to identity
+        # CPD bakes the warp into positions → reset alignment transform to identity
         new_pc = PointCloud(warped)
-        self._secondary_pc = new_pc
-        self._secondary_base_transform = np.eye(4, dtype=np.float32)
+        self._pc_secondary = new_pc
+        self._secondary_alignment_T = np.eye(4, dtype=np.float32)
         self._merge_panel.reset_transform_spinboxes()
         self._merge_panel.set_secondary_loaded("(warped)", len(warped))
         self._merge_panel.set_cpd_status(f"Done — {len(warped):,} warped points")
-        self._viewport.load_secondary(new_pc)
+
+        # Switch to primary view so user can inspect the warped overlay
+        if self._editing_secondary:
+            self._pc = self._pc_primary
+            self._editing_secondary = False
+            self._viewport.reload_point_cloud(self._pc_primary)
+            self._merge_panel.set_editing_state(editing_secondary=False)
+        self._viewport.load_reference(new_pc, transform=None)
+        self._status.update_point_cloud(self._pc)
 
     def _merge_clouds(self) -> None:
-        """Apply the current transform to the secondary cloud and concatenate into primary."""
-        if self._pc is None or self._secondary_pc is None:
+        """
+        Apply the current alignment transform to the secondary cloud and
+        concatenate it into the primary.  The result is undoable.
+        """
+        if self._pc_primary is None or self._pc_secondary is None:
             return
 
-        # Build total transform (base @ current manual spinbox state —
-        # the viewport already has the composed transform, so read it directly)
+        # Apply alignment transform to secondary alive positions
         T = self._viewport._secondary_transform.astype(np.float64)
+        sec_pos    = self._pc_secondary.positions[self._pc_secondary.alive_mask].astype(np.float64)
+        ones       = np.ones((len(sec_pos), 1), dtype=np.float64)
+        warped_pos = (T @ np.concatenate([sec_pos, ones], axis=1).T).T[:, :3].astype(np.float32)
+        sec_colors = self._pc_secondary.colors[self._pc_secondary.alive_mask]
 
-        # Transform secondary alive positions
-        sec_pos = self._secondary_pc.positions[self._secondary_pc.alive_mask].astype(np.float64)
-        ones = np.ones((len(sec_pos), 1), dtype=np.float64)
-        sec_h = np.concatenate([sec_pos, ones], axis=1)
-        merged_pos = (T @ sec_h.T).T[:, :3].astype(np.float32)
+        pri_pos    = self._pc_primary.positions[self._pc_primary.alive_mask]
+        pri_colors = self._pc_primary.colors[self._pc_primary.alive_mask]
 
-        sec_colors = self._secondary_pc.colors[self._secondary_pc.alive_mask]
-
-        # Concatenate with primary alive points
-        pri_pos    = self._pc.positions[self._pc.alive_mask]
-        pri_colors = self._pc.colors[self._pc.alive_mask]
-
-        all_pos    = np.concatenate([pri_pos, merged_pos], axis=0)
+        all_pos    = np.concatenate([pri_pos, warped_pos], axis=0)
         all_colors = np.concatenate([pri_colors, sec_colors], axis=0)
+        merged_pc  = PointCloud(all_pos, all_colors)
 
-        merged_pc = PointCloud(all_pos, all_colors)
-        self._clear_secondary()
-        self._on_load_finished(merged_pc)
+        # Clear secondary state before the replacement so that _apply_active_cloud
+        # (called by execute()) sees no secondary and updates _pc_primary correctly.
+        old_primary = self._pc_primary
+        self._pc_secondary = None
+        self._secondary_alignment_T = np.eye(4, dtype=np.float32)
+        self._editing_secondary = False
+        self._viewport.clear_reference()
+        self._merge_panel.clear_secondary_status()
+
+        # Push: execute() calls _apply_active_cloud(merged_pc)
+        cmd = ReplaceCloudCommand(old_primary, merged_pc, self._apply_active_cloud, "merge")
+        self._undo_stack.push(cmd)
 
     # ── Edit actions ──────────────────────────────────────────────────────────
 
@@ -542,7 +655,9 @@ class MainWindow(QMainWindow):
 
     def _on_command_executed(self) -> None:
         """Called after every undo/redo push — refresh VBOs and UI."""
-        # The command may have touched alive or colors; mark both dirty to be safe
+        # ReplaceCloudCommand already calls reload_point_cloud, which uploads
+        # fresh GPU buffers.  For DeleteCommand / ColorCommand the cloud object
+        # is the same but its arrays changed, so mark them dirty here.
         if self._viewport.renderer:
             self._viewport.renderer.mark_alive_dirty()
             self._viewport.renderer.mark_colors_dirty()
@@ -578,7 +693,7 @@ class MainWindow(QMainWindow):
     _CAM_KEYS = {
         int(Qt.Key.Key_W), int(Qt.Key.Key_A),
         int(Qt.Key.Key_S), int(Qt.Key.Key_D),
-        int(Qt.Key.Key_Space), int(Qt.Key.Key_Control),
+        int(Qt.Key.Key_Space), int(Qt.Key.Key_Shift),
     }
 
     def eventFilter(self, obj, event) -> bool:

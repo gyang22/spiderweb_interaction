@@ -24,6 +24,7 @@ class MergePanel(QDockWidget):
     # ── signals ───────────────────────────────────────────────────────────────
     load_secondary_clicked  = pyqtSignal()
     clear_secondary_clicked = pyqtSignal()
+    switch_active_clicked   = pyqtSignal()   # toggle which cloud is being edited
     run_icp_clicked         = pyqtSignal()
     run_cpd_clicked         = pyqtSignal()
     merge_clicked           = pyqtSignal()
@@ -63,6 +64,21 @@ class MergePanel(QDockWidget):
         self._lbl_sec_status.setWordWrap(True)
         self._lbl_sec_status.setStyleSheet("color: #aaa; font-size: 11px;")
         sec_layout.addWidget(self._lbl_sec_status)
+
+        # Active-cloud indicator + switch button
+        self._lbl_editing = QLabel("")
+        self._lbl_editing.setStyleSheet("font-size: 11px; font-weight: bold;")
+        sec_layout.addWidget(self._lbl_editing)
+
+        self._btn_switch = QPushButton("")
+        self._btn_switch.setFixedHeight(28)
+        self._btn_switch.setEnabled(False)
+        self._btn_switch.setToolTip(
+            "Switch which cloud is active for editing.\n"
+            "The inactive cloud is shown as a dim reference overlay."
+        )
+        self._btn_switch.clicked.connect(self.switch_active_clicked)
+        sec_layout.addWidget(self._btn_switch)
 
         self._btn_clear_sec = QPushButton("Clear Secondary")
         self._btn_clear_sec.setFixedHeight(28)
@@ -204,9 +220,24 @@ class MergePanel(QDockWidget):
         self._lbl_sec_status.setStyleSheet("color: #88cc88; font-size: 11px;")
         self._set_secondary_controls_enabled(True)
 
+    def set_editing_state(self, editing_secondary: bool) -> None:
+        """Update the indicator showing which cloud is currently active."""
+        if editing_secondary:
+            self._lbl_editing.setText("Editing: Secondary")
+            self._lbl_editing.setStyleSheet(
+                "font-size: 11px; font-weight: bold; color: #88ccff;")
+            self._btn_switch.setText("Switch to Primary")
+        else:
+            self._lbl_editing.setText("Editing: Primary")
+            self._lbl_editing.setStyleSheet(
+                "font-size: 11px; font-weight: bold; color: #ffcc88;")
+            self._btn_switch.setText("Switch to Secondary")
+        self._btn_switch.setEnabled(True)
+
     def clear_secondary_status(self) -> None:
         self._lbl_sec_status.setText("No secondary cloud loaded")
         self._lbl_sec_status.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._lbl_editing.setText("")
         self._lbl_icp_result.setText("")
         self._lbl_cpd_status.setText("")
         self._set_secondary_controls_enabled(False)
@@ -232,6 +263,7 @@ class MergePanel(QDockWidget):
 
     def _set_secondary_controls_enabled(self, enabled: bool) -> None:
         self._btn_clear_sec.setEnabled(enabled)
+        self._btn_switch.setEnabled(enabled)
         self._btn_icp.setEnabled(enabled)
         self._btn_cpd.setEnabled(enabled)
         self._btn_merge.setEnabled(enabled)
