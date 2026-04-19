@@ -1,4 +1,4 @@
-"""Freehand polygon (lasso) selection tool."""
+"""Freehand polygon (lasso) selection tool (PCD or skeleton nodes)."""
 
 import numpy as np
 from PyQt6.QtCore import Qt, QPoint
@@ -47,7 +47,6 @@ class LassoSelectTool(AbstractTool):
     def mouse_move(self, event, viewport) -> None:
         if self._drawing:
             pt = event.position().toPoint()
-            # Add vertex only if it moved enough (avoids huge polygon arrays)
             if not self._polygon or (
                 abs(pt.x() - self._polygon[-1].x()) > 2 or
                 abs(pt.y() - self._polygon[-1].y()) > 2
@@ -64,23 +63,20 @@ class LassoSelectTool(AbstractTool):
 
         self._drawing = False
 
-        if not viewport.has_point_cloud():
+        if not viewport.has_selectable():
             self._polygon = []
             viewport.update()
             return
 
-        # CPU-side projection: select ALL points inside polygon regardless of depth
         poly = np.array([[p.x(), p.y()] for p in self._polygon], dtype=np.float32)
-        screen_xy, alive_idx = viewport.screen_project_alive()
-        inside = _points_in_polygon(screen_xy, poly)
-        indices = alive_idx[inside]
+        screen_xy, all_idx = viewport.project_selectable()
+        inside  = _points_in_polygon(screen_xy, poly)
+        indices = all_idx[inside]
 
-        pc = viewport.point_cloud
         add = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        pc.select_indices(indices, add=add)
+        viewport.apply_region_selection(indices, add)
 
         self._polygon = []
-        viewport.on_selection_changed()
         viewport.update()
 
     def draw_overlay(self, painter: QPainter) -> None:
@@ -90,6 +86,5 @@ class LassoSelectTool(AbstractTool):
         painter.setPen(pen)
         for i in range(len(self._polygon) - 1):
             painter.drawLine(self._polygon[i], self._polygon[i + 1])
-        # Close the lasso visually
         if len(self._polygon) >= 3:
             painter.drawLine(self._polygon[-1], self._polygon[0])

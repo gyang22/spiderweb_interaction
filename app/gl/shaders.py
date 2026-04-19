@@ -113,35 +113,39 @@ void main() {
 SKEL_VERT = """
 #version 330 core
 
-layout(location = 0) in vec3 a_position;
+layout(location = 0) in vec3  a_position;
+layout(location = 1) in float a_selected;  // 1.0 = selected, 0.0 = normal
 
 uniform mat4  u_mvp;
 uniform float u_point_size;
 
+out float v_selected;
+
 void main() {
     vec4 pos = u_mvp * vec4(a_position, 1.0);
-    // Pulls skeleton forward by 0.001 to render above unselected points, but behind selected points (which are 0.002)
-    pos.z -= 0.001 * pos.w;
+    // Pulls skeleton forward slightly; selected nodes pop further forward
+    pos.z -= (a_selected > 0.5 ? 0.003 : 0.001) * pos.w;
     gl_Position  = pos;
-    gl_PointSize = u_point_size;
+    gl_PointSize = u_point_size * (a_selected > 0.5 ? 1.4 : 1.0);
+    v_selected   = a_selected;
 }
 """
 
 SKEL_FRAG = """
 #version 330 core
 
+in float v_selected;
 uniform vec4 u_color;
+uniform vec4 u_selected_color;
 uniform int  u_round_points;  // 1 = circular sprite (GL_POINTS); 0 = solid (GL_LINES)
 out vec4 frag_color;
 
 void main() {
-    // gl_PointCoord is undefined for GL_LINES in core profile, so skip the
-    // discard test entirely when drawing lines to avoid killing all fragments.
     if (u_round_points != 0) {
         vec2 coord = gl_PointCoord - vec2(0.5);
         if (dot(coord, coord) > 0.25) discard;
     }
-    frag_color = u_color;
+    frag_color = (u_round_points != 0 && v_selected > 0.5) ? u_selected_color : u_color;
 }
 """
 

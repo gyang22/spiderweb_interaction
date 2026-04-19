@@ -128,6 +128,23 @@ class ToolBar(QToolBar):
         self._btn_delete.setStyleSheet("color: #ff6666; font-weight: bold;")
         self.addWidget(self._btn_delete)
 
+        self.addSeparator()
+
+        # ── Hotkey reference ──────────────────────────────────────────────────
+        self.addWidget(_label("Hotkeys"))
+        _HOTKEYS = [
+            ("G",         "Extract skeleton"),
+            ("G (edit)",  "Re-extract selected"),
+            ("Del / Q",   "Delete selected (pts or nodes)"),
+            ("Home",      "Reset camera"),
+            ("Tab",       "Toggle FPS mode"),
+            ("W A S D",   "Fly camera"),
+            ("Space",     "Fly up"),
+            ("Shift",     "Fly down"),
+        ]
+        for key, desc in _HOTKEYS:
+            self.addWidget(_hotkey_row(key, desc))
+
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _add_tool_button(self, label: str, name: str, checkable: bool = False) -> QPushButton:
@@ -163,3 +180,25 @@ def _label(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet("color: #aaa; font-size: 10px; padding: 2px 6px 0 6px;")
     return lbl
+
+
+def _hotkey_row(key: str, desc: str) -> QWidget:
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(6, 0, 6, 1)
+    layout.setSpacing(4)
+
+    key_lbl = QLabel(key)
+    key_lbl.setStyleSheet(
+        "color: #ddd; font-size: 10px; font-family: monospace;"
+        "background: #333; border-radius: 3px; padding: 1px 4px;"
+    )
+    key_lbl.setFixedWidth(62)
+
+    desc_lbl = QLabel(desc)
+    desc_lbl.setStyleSheet("color: #888; font-size: 10px;")
+    desc_lbl.setWordWrap(True)
+
+    layout.addWidget(key_lbl)
+    layout.addWidget(desc_lbl, stretch=1)
+    return row

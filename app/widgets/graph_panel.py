@@ -17,7 +17,9 @@ class GraphPanel(QDockWidget):
     # Skeleton
     extract_clicked = pyqtSignal()
     extract_intelligent_clicked = pyqtSignal()
+    cancel_intelligent_clicked  = pyqtSignal()
     export_clicked  = pyqtSignal()
+    import_clicked  = pyqtSignal()
     clear_clicked   = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
@@ -142,12 +144,22 @@ class GraphPanel(QDockWidget):
         self._lbl_stats.setWordWrap(True)
         skel_layout.addWidget(self._lbl_stats)
 
+        io_row = QHBoxLayout()
+
+        self._btn_import = QPushButton("Import JSON…")
+        self._btn_import.setFixedHeight(32)
+        self._btn_import.setToolTip("Load a skeleton graph from JSON and merge it into the current skeleton.")
+        self._btn_import.clicked.connect(self.import_clicked)
+        io_row.addWidget(self._btn_import)
+
         self._btn_export = QPushButton("Export JSON…")
         self._btn_export.setFixedHeight(32)
         self._btn_export.setEnabled(False)
         self._btn_export.setToolTip("Save accumulated skeleton graph as JSON.")
         self._btn_export.clicked.connect(self.export_clicked)
-        skel_layout.addWidget(self._btn_export)
+        io_row.addWidget(self._btn_export)
+
+        skel_layout.addLayout(io_row)
 
         self._btn_clear = QPushButton("Clear Skeleton")
         self._btn_clear.setFixedHeight(32)
@@ -203,6 +215,22 @@ class GraphPanel(QDockWidget):
         self._btn_intel_extract.clicked.connect(self.extract_intelligent_clicked)
         intel_layout.addWidget(self._btn_intel_extract)
 
+        self._btn_intel_cancel = QPushButton("Cancel")
+        self._btn_intel_cancel.setFixedHeight(30)
+        self._btn_intel_cancel.setStyleSheet("color: #ff9966;")
+        self._btn_intel_cancel.setToolTip(
+            "Cancel the running extraction.\n"
+            "During C++ stages the current step must finish first."
+        )
+        self._btn_intel_cancel.clicked.connect(self.cancel_intelligent_clicked)
+        self._btn_intel_cancel.setVisible(False)
+        intel_layout.addWidget(self._btn_intel_cancel)
+
+        self._lbl_intel_status = QLabel("")
+        self._lbl_intel_status.setStyleSheet("color: #aaa; font-size: 11px; padding: 2px 0;")
+        self._lbl_intel_status.setWordWrap(True)
+        intel_layout.addWidget(self._lbl_intel_status)
+
         layout.addWidget(intel_group)
         layout.addStretch()
         self.setWidget(root)
@@ -248,6 +276,17 @@ class GraphPanel(QDockWidget):
 
     def get_persistence_threshold(self) -> float:
         return self._spin_persist.value()
+
+    # ── Intelligent skeleton public API ───────────────────────────────────────
+
+    def set_intel_running(self, running: bool) -> None:
+        self._btn_intel_extract.setEnabled(not running)
+        self._btn_intel_cancel.setVisible(running)
+        if not running:
+            self._lbl_intel_status.setText("")
+
+    def set_intel_progress(self, text: str) -> None:
+        self._lbl_intel_status.setText(text)
 
     # ── private ───────────────────────────────────────────────────────────────
 

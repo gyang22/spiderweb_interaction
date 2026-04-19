@@ -37,14 +37,14 @@ from app import settings
 
 
 class GLViewport(QOpenGLWidget):
-    frame_rendered  = pyqtSignal(float)   # FPS
+    frame_rendered    = pyqtSignal(float)   # FPS
     selection_changed = pyqtSignal()
-    fps_mode_changed = pyqtSignal(bool)   # True = entered FPS mode
+    fps_mode_changed  = pyqtSignal(bool)    # True = entered FPS mode
+    skel_selection_changed = pyqtSignal()   # fired when skeleton node selection changes
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # Belt-and-suspenders: set format on widget itself (macOS needs this)
         fmt = QSurfaceFormat()
         fmt.setVersion(3, 3)
         fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
@@ -60,6 +60,11 @@ class GLViewport(QOpenGLWidget):
         self._secondary_transform: np.ndarray = np.eye(4, dtype=np.float32)
         self.tool_manager = ToolManager(self)
         self.point_cloud  = None
+
+        # Skeleton edit mode state
+        self.skeleton_edit_mode: bool = False
+        self._skel_nodes: np.ndarray | None = None      # (M, 3) CPU copy of skeleton nodes
+        self._skel_selection: np.ndarray | None = None  # (M,) bool mask
         self._home_position     = np.array([0.0, 0.0, 5.0], dtype=np.float32)
         self._home_yaw          = 0.0
         self._home_pitch        = 0.0
@@ -161,6 +166,7 @@ class GLViewport(QOpenGLWidget):
         """Upload a StrandGraph to the skeleton renderer and repaint."""
         if self.skeleton_renderer is None:
             return
+        self._skel_nodes = graph.nodes.copy() if len(graph.nodes) > 0 else None
         self.makeCurrent()
         self.skeleton_renderer.upload(graph)
         self.doneCurrent()
@@ -170,7 +176,134 @@ class GLViewport(QOpenGLWidget):
         """Remove the skeleton overlay."""
         if self.skeleton_renderer:
             self.skeleton_renderer.clear()
+        self._skel_nodes = None
+        self._skel_selection = None
         self.update()
+
+    # ── skeleton edit mode ────────────────────────────────────────────────────
+
+    def has_selectable(self) -> bool:
+        """True when there is something to select (PCD or skeleton nodes in edit mode)."""
+        if self.skeleton_edit_mode:
+            return self._skel_nodes is not None and len(self._skel_nodes) > 0
+        return self.has_point_cloud()
+
+    def reset_skel_selection(self) -> None:
+        """Allocate/reset the skeleton selection mask to all-False."""
+        n = len(self._skel_nodes) if self._skel_nodes is not None else 0
+        self._skel_selection = np.zeros(n, dtype=bool) if n > 0 else None
+        self._upload_skel_selection()
+        self.skel_selection_changed.emit()
+
+    def _upload_skel_selection(self) -> None:
+        if self.skeleton_renderer is None or self._skel_selection is None:
+            return
+        self.makeCurrent()
+        self.skeleton_renderer.upload_selection(self._skel_selection)
+        self.doneCurrent()
+        self.update()
+
+    def screen_project_skeleton_nodes(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Project skeleton nodes to logical widget screen coords.
+
+        Returns
+        -------
+        screen_xy    : (M, 2) float32  — logical pixel coords (x right, y down)
+        node_indices : (M,) int32      — index into skeleton node array for each row
+        """
+        nodes = self._skel_nodes
+        if nodes is None or len(nodes) == 0:
+            return np.empty((0, 2), dtype=np.float32), np.empty(0, dtype=np.int32)
+
+        mvp  = self.camera.get_mvp_matrix()
+        ones = np.ones((len(nodes), 1), dtype=np.float32)
+        pos_h = np.concatenate([nodes.astype(np.float32), ones], axis=1)
+        clip  = pos_h @ mvp.T.astype(np.float32)
+
+        w       = clip[:, 3]
+        visible = w > 0.0
+        clip    = clip[visible]
+        idx     = np.where(visible)[0].astype(np.int32)
+
+        if len(clip) == 0:
+            return np.empty((0, 2), dtype=np.float32), idx
+
+        w   = clip[:, 3:4]
+        ndc = clip[:, :3] / w
+        W, H = float(self.width()), float(self.height())
+        sx = (ndc[:, 0] + 1.0) * 0.5 * W
+        sy = (1.0 - ndc[:, 1]) * 0.5 * H
+        return np.stack([sx, sy], axis=1).astype(np.float32), idx
+
+    # ── unified selection dispatch ─────────────────────────────────────────────
+
+    def project_selectable(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return (screen_xy, indices) for the current selection target."""
+        if self.skeleton_edit_mode:
+            return self.screen_project_skeleton_nodes()
+        return self.screen_project_alive()
+
+    def apply_click_selection(self, x: int, y: int, add: bool) -> None:
+        """Handle a click-select at logical coords (x, y)."""
+        if self.skeleton_edit_mode:
+            if self._skel_selection is None:
+                return
+            idx = self._pick_skeleton_node(x, y)
+            if idx >= 0:
+                if add:
+                    self._skel_selection[idx] = not self._skel_selection[idx]
+                else:
+                    self._skel_selection[:] = False
+                    self._skel_selection[idx] = True
+            elif not add:
+                self._skel_selection[:] = False
+            self._upload_skel_selection()
+            self.skel_selection_changed.emit()
+        else:
+            if not self.has_point_cloud():
+                return
+            index = self.do_picking(x, y)
+            pc = self.point_cloud
+            if index >= 0 and index < pc.total_count and pc.alive_mask[index]:
+                if add:
+                    pc.selection_mask[index] = not pc.selection_mask[index]
+                else:
+                    pc.deselect_all()
+                    pc.selection_mask[index] = True
+            else:
+                if not add:
+                    pc.deselect_all()
+            self.on_selection_changed()
+
+    def apply_region_selection(self, indices: np.ndarray, add: bool) -> None:
+        """Apply a region selection result (box or lasso)."""
+        if self.skeleton_edit_mode:
+            if self._skel_selection is None:
+                return
+            if not add:
+                self._skel_selection[:] = False
+            self._skel_selection[indices] = True
+            self._upload_skel_selection()
+            self.skel_selection_changed.emit()
+        else:
+            if not self.has_point_cloud():
+                return
+            self.point_cloud.select_indices(indices, add=add)
+            self.on_selection_changed()
+
+    def _pick_skeleton_node(self, x: int, y: int, radius: float = 15.0) -> int:
+        """Return index of nearest skeleton node within `radius` screen pixels, or -1."""
+        screen_xy, node_idx = self.screen_project_skeleton_nodes()
+        if len(screen_xy) == 0:
+            return -1
+        dx = screen_xy[:, 0] - x
+        dy = screen_xy[:, 1] - y
+        dist2 = dx * dx + dy * dy
+        nearest = int(dist2.argmin())
+        if dist2[nearest] <= radius * radius:
+            return int(node_idx[nearest])
+        return -1
 
     def reload_point_cloud(self, pc) -> None:
         """Re-upload a point cloud to GPU without resetting the camera or tools."""

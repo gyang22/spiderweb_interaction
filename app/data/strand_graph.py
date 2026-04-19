@@ -40,6 +40,77 @@ def merge_graphs(g1: StrandGraph, g2: StrandGraph) -> StrandGraph:
     return StrandGraph(nodes=nodes.astype(np.float32), edges=edges.astype(np.int32))
 
 
+def merge_graphs_with_bridges(
+    existing: StrandGraph,
+    new_sub: StrandGraph,
+    bridge_factor: float = 2.0,
+) -> StrandGraph:
+    """
+    Merge two StrandGraphs like merge_graphs, but also add bridge edges that
+    connect nodes in new_sub to nearby nodes in existing.
+
+    All existing edges are preserved unchanged.  Bridge edges are added for
+    every new_sub node whose nearest existing node is within
+    ``bridge_factor × median_existing_edge_length``.
+    """
+    N_e = len(existing.nodes)
+    combined_nodes = np.concatenate([existing.nodes, new_sub.nodes], axis=0)
+
+    if len(existing.edges) == 0:
+        base_edges = (new_sub.edges + N_e).copy() if len(new_sub.edges) > 0 \
+                     else np.empty((0, 2), dtype=np.int32)
+    elif len(new_sub.edges) == 0:
+        base_edges = existing.edges.copy()
+    else:
+        base_edges = np.concatenate(
+            [existing.edges, new_sub.edges + N_e], axis=0
+        )
+
+    # Compute bridge distance threshold from existing skeleton edge lengths.
+    if N_e > 0 and len(new_sub.nodes) > 0:
+        if len(existing.edges) > 0:
+            ex_lengths = np.linalg.norm(
+                existing.nodes[existing.edges[:, 0]] -
+                existing.nodes[existing.edges[:, 1]],
+                axis=1,
+            )
+            threshold = float(np.median(ex_lengths)) * bridge_factor
+        elif len(new_sub.edges) > 0:
+            ns_lengths = np.linalg.norm(
+                new_sub.nodes[new_sub.edges[:, 0]] -
+                new_sub.nodes[new_sub.edges[:, 1]],
+                axis=1,
+            )
+            threshold = float(np.median(ns_lengths)) * bridge_factor
+        else:
+            threshold = float("inf")
+
+        # (M_new, N_existing) pairwise distances
+        diff = new_sub.nodes[:, None, :] - existing.nodes[None, :, :]
+        dists = np.sqrt((diff ** 2).sum(axis=-1))
+        nearest_ex = dists.argmin(axis=1)
+        nearest_d  = dists[np.arange(len(new_sub.nodes)), nearest_ex]
+
+        seen: set[tuple[int, int]] = set()
+        bridge_list: list[tuple[int, int]] = []
+        for new_i, (ex_i, d) in enumerate(zip(nearest_ex.tolist(), nearest_d.tolist())):
+            if d <= threshold:
+                a, b = N_e + new_i, int(ex_i)
+                key = (min(a, b), max(a, b))
+                if key not in seen:
+                    seen.add(key)
+                    bridge_list.append(key)
+
+        if bridge_list:
+            bridges = np.array(bridge_list, dtype=np.int32)
+            base_edges = np.concatenate([base_edges, bridges], axis=0)
+
+    return StrandGraph(
+        nodes=combined_nodes.astype(np.float32),
+        edges=base_edges.astype(np.int32),
+    )
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def extract_skeleton(

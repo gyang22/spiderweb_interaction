@@ -22,12 +22,16 @@ from app.widgets.toolbar import ToolBar
 from app.widgets.status_bar import StatusBar
 from app.widgets.graph_panel import GraphPanel
 from app.widgets.merge_panel import MergePanel
+from app.widgets.skeleton_editor_panel import SkeletonEditorPanel
 from app.commands.undo_stack import UndoStack
 from app.commands.delete_command import DeleteCommand
 from app.commands.color_command import ColorCommand
 from app.data.pcd_io import load_pcd, save_pcd
 from app.data.ply_export import export_ply
-from app.data.strand_graph import extract_skeleton, merge_graphs, StrandGraph
+from app.data.strand_graph import (
+    extract_skeleton, merge_graphs, merge_graphs_with_bridges, StrandGraph,
+    _build_knn_edges, _kruskal_mst,
+)
 from app.data.graph_io import export_graph_json, import_graph_json
 from app.data.downsample import voxel_downsample
 from app.data.align import icp_align, cpd_align, euler_to_transform
@@ -56,8 +60,10 @@ class _LoadWorker(QObject):
 
 
 class _GraphWorker(QObject):
-    finished = pyqtSignal(object)   # StrandGraph
-    error = pyqtSignal(str)
+    finished  = pyqtSignal(object)  # StrandGraph
+    error     = pyqtSignal(str)
+    progress  = pyqtSignal(str)     # human-readable stage description
+    cancelled = pyqtSignal()
 
     def __init__(self, pcd, tau_detour, keep_tau, voxel_size, persistence_threshold):
         super().__init__()
@@ -66,22 +72,156 @@ class _GraphWorker(QObject):
         self._keep_tau = keep_tau
         self._voxel_size = voxel_size
         self._persistence_threshold = persistence_threshold
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
 
     def run(self) -> None:
+        import os, shutil, tempfile
+        import dmpcd as dm
+        from pcd_graph_recon.api import (
+            filter_marker2_by_detour, edge_length_percentile_filter,
+        )
         try:
-            graph_results = generate_graph(
-                pcd=self._pcd,
-                tau_detour=self._tau_detour,
-                keep_tau=self._keep_tau,
-                voxel_size=self._voxel_size,
-                persistence_threshold=self._persistence_threshold
+            from MomentumConnect import MomentumConnect
+        except ImportError:
+            import sys as _sys
+            _sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(
+                __import__('pcd_graph_recon').__file__
+            ))))
+            from MomentumConnect import MomentumConnect
+
+        tmpdir = tempfile.mkdtemp(prefix="spiderweb_skel_")
+        try:
+            # ── Stage 1: downsample ───────────────────────────────────────────
+            self.progress.emit("1/5  Downsampling…")
+            pcd_down = (self._pcd.voxel_down_sample(self._voxel_size)
+                        if self._voxel_size else self._pcd)
+            points = np.asarray(pcd_down.points)
+
+            if self._cancel_requested:
+                self.cancelled.emit()
+                return
+
+            output_dir = os.path.join(tmpdir, "output")
+            os.makedirs(output_dir, exist_ok=True)
+            feature_filename = os.path.join(tmpdir, "features.txt")
+            np.savetxt(feature_filename, points, fmt="%.6f")
+
+            # ── Stage 2: build filtration (pure Python, can be slow) ──────────
+            self.progress.emit("2/5  Building filtration…")
+            dm.pcd.build_sparse_weighted_rips_filtration(
+                feature_filename, output_dir, 15, "euclidean", 0.99
             )
-            nodes = np.array(graph_results['nodes'], dtype=np.float32)
-            edges = np.array(graph_results['edges'], dtype=np.int32)
-            graph = StrandGraph(nodes=nodes, edges=edges)
-            self.finished.emit(graph)
+
+            if self._cancel_requested:
+                self.cancelled.emit()
+                return
+
+            # ── Stage 3: compute persistence (C++ subprocess) ─────────────────
+            self.progress.emit("3/5  Computing persistence…")
+            filtration_filename = os.path.join(output_dir,
+                                               "sparse_weighted_rips_filtration.txt")
+            dm.pcd.compute_persistence_swr(filtration_filename, output_dir)
+
+            if self._cancel_requested:
+                self.cancelled.emit()
+                return
+
+            # ── Stage 4: graph reconstruction (C++ subprocess) ────────────────
+            self.progress.emit("4/5  Reconstructing graph…")
+            weights_filename        = os.path.join(output_dir, "weights.txt")
+            edge_filename           = os.path.join(output_dir, "edge_for_morse_only.txt")
+            sorted_weights_filename = os.path.join(output_dir, "sorted-weights.txt")
+            dm.pcd.reorder_weights(weights_filename, sorted_weights_filename)
+            dm.pcd.compute_graph_reconstruction(
+                sorted_weights_filename, edge_filename,
+                self._persistence_threshold, output_dir,
+            )
+
+            if self._cancel_requested:
+                self.cancelled.emit()
+                return
+
+            # ── Stage 5: post-processing ──────────────────────────────────────
+            self.progress.emit("5/5  Filtering edges…")
+
+            potential = ["edge.txt", "dimo_edge.txt"]
+            edge_txt_path = next(
+                (os.path.join(output_dir, f) for f in potential
+                 if os.path.exists(os.path.join(output_dir, f))),
+                None,
+            )
+            if edge_txt_path is None:
+                raise RuntimeError(
+                    "Graph reconstruction failed to produce an edge file."
+                )
+            final_edge_txt = os.path.join(output_dir, "edge.txt")
+            if edge_txt_path != final_edge_txt:
+                os.rename(edge_txt_path, final_edge_txt)
+                edge_txt_path = final_edge_txt
+
+            sorted_feature_filename = os.path.join(output_dir, "sorted-feature.txt")
+            dm.pcd.reorder_verts_by_weight(
+                weights_filename, feature_filename, sorted_feature_filename
+            )
+
+            points_sorted = np.loadtxt(sorted_feature_filename)
+            if points_sorted.ndim == 1:
+                points_sorted = points_sorted.reshape(-1, 3)
+            if len(points_sorted) > 0 and points_sorted.shape[1] == 2:
+                points_sorted = np.hstack(
+                    [points_sorted, np.zeros((len(points_sorted), 1))]
+                )
+
+            edges_list = []
+            with open(edge_txt_path) as fh:
+                for line in fh:
+                    s = line.strip().split()
+                    if len(s) >= 3:
+                        edges_list.append([int(s[0]), int(s[1]), int(s[2])])
+            E = (np.array(edges_list, dtype=int) if edges_list
+                 else np.empty((0, 3), dtype=int))
+
+            good2, bad2 = filter_marker2_by_detour(
+                points_sorted, E, tau_detour=self._tau_detour
+            )
+            base_mask     = np.isin(E[:, 2], (-1, 1))
+            base_edges    = E[base_mask, :2]
+            filtered_edges = (np.vstack([base_edges, good2])
+                              if len(good2) > 0 else base_edges)
+            added_back     = MomentumConnect(
+                filtered_edges, bad2, points_sorted, self._keep_tau, 30
+            )
+            final_edges_indices = (np.vstack([filtered_edges, added_back])
+                                   if len(added_back) > 0 else filtered_edges)
+
+            base_edges_full = E[base_mask, :]
+            good2_full = (np.hstack([good2, 2 * np.ones((len(good2), 1), dtype=int)])
+                          if len(good2) > 0 else np.empty((0, 3), dtype=int))
+            added_back_full = (np.hstack([added_back,
+                                          2 * np.ones((len(added_back), 1), dtype=int)])
+                               if len(added_back) > 0 else np.empty((0, 3), dtype=int))
+            final_edges_full = np.vstack([base_edges_full, good2_full, added_back_full])
+
+            if final_edges_full.shape[0] > 0:
+                final_edges_full, _, _ = edge_length_percentile_filter(
+                    points_sorted, final_edges_full, percentile=75.0
+                )
+
+            nodes = np.array(points_sorted, dtype=np.float32)
+            edges = np.array(
+                final_edges_full[:, :2] if len(final_edges_full) > 0
+                else np.empty((0, 2), dtype=int),
+                dtype=np.int32,
+            )
+            self.finished.emit(StrandGraph(nodes=nodes, edges=edges))
+
         except Exception as exc:
             self.error.emit(str(exc))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ── MainWindow ─────────────────────────────────────────────────────────────────
@@ -108,6 +248,8 @@ class MainWindow(QMainWindow):
         self._secondary_alignment_T: np.ndarray = np.eye(4, dtype=np.float32)
 
         self._skeleton: StrandGraph | None = None
+        self._graph_thread: QThread | None = None
+        self._graph_worker: _GraphWorker | None = None
         self._undo_stack = UndoStack(self)
         self._undo_stack.changed.connect(self._on_command_executed)
 
@@ -139,6 +281,8 @@ class MainWindow(QMainWindow):
         self._graph_panel.downsample_clicked.connect(self._downsample_cloud)
         self._graph_panel.extract_clicked.connect(self._extract_skeleton)
         self._graph_panel.extract_intelligent_clicked.connect(self._extract_intelligent_skeleton)
+        self._graph_panel.cancel_intelligent_clicked.connect(self._cancel_intelligent_skeleton)
+        self._graph_panel.import_clicked.connect(self._import_graph)
         self._graph_panel.export_clicked.connect(self._export_graph)
         self._graph_panel.clear_clicked.connect(self._clear_skeleton)
 
@@ -153,6 +297,17 @@ class MainWindow(QMainWindow):
         self._merge_panel.run_cpd_clicked.connect(self._run_cpd)
         self._merge_panel.merge_clicked.connect(self._merge_clouds)
         self._merge_panel.transform_changed.connect(self._on_manual_transform_changed)
+
+        # Skeleton editor panel (right-docked, tabbed)
+        self._skel_editor = SkeletonEditorPanel(self)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._skel_editor)
+        self.tabifyDockWidget(self._merge_panel, self._skel_editor)
+        self._skel_editor.edit_mode_changed.connect(self._on_skel_edit_mode_changed)
+        self._skel_editor.select_all_clicked.connect(self._skel_select_all)
+        self._skel_editor.deselect_all_clicked.connect(self._skel_deselect_all)
+        self._skel_editor.reextract_clicked.connect(self._reextract_selected_skel_nodes)
+        self._skel_editor.delete_nodes_clicked.connect(self._delete_selected_skel_nodes)
+        self._viewport.skel_selection_changed.connect(self._on_skel_selection_changed)
 
         self._build_menu()
 
@@ -283,6 +438,9 @@ class MainWindow(QMainWindow):
         self._skeleton = None
         self._viewport.clear_skeleton()
         self._graph_panel.clear_stats()
+        self._skel_editor.set_node_stats(0, 0)
+        self._skel_editor.set_edit_mode(False)
+        self._viewport.skeleton_edit_mode = False
         # Clear secondary cloud whenever a fresh primary is loaded
         self._pc_secondary = None
         self._secondary_alignment_T = np.eye(4, dtype=np.float32)
@@ -411,12 +569,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Extraction error", str(exc))
             return
 
-        # Accumulate: merge new graph onto whatever was already extracted
+        # Merge into existing skeleton, bridging new nodes to nearby existing ones.
         if self._skeleton is not None:
-            graph = merge_graphs(self._skeleton, graph)
+            graph = merge_graphs_with_bridges(self._skeleton, graph)
         self._skeleton = graph
-        self._viewport.set_skeleton(graph)
-        self._graph_panel.set_stats(len(graph.nodes), len(graph.edges))
+        self._viewport.set_skeleton(self._skeleton)
+        self._graph_panel.set_stats(len(self._skeleton.nodes), len(self._skeleton.edges))
 
     def _extract_intelligent_skeleton(self) -> None:
         if not _HAS_GRAPH_RECON:
@@ -449,11 +607,8 @@ class MainWindow(QMainWindow):
         keep_tau = self._graph_panel.get_keep_tau()
         persist_thresh = self._graph_panel.get_persistence_threshold()
 
-        progress = QProgressDialog("Generating intelligent skeleton…", None, 0, 0, self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(300)
-        progress.show()
-        QApplication.processEvents()
+        self._graph_panel.set_intel_running(True)
+        self._graph_panel.set_intel_progress("Starting…")
 
         self._graph_thread = QThread()
         self._graph_worker = _GraphWorker(
@@ -462,29 +617,36 @@ class MainWindow(QMainWindow):
         self._graph_worker.moveToThread(self._graph_thread)
 
         self._graph_thread.started.connect(self._graph_worker.run)
+        self._graph_worker.progress.connect(self._graph_panel.set_intel_progress)
         self._graph_worker.finished.connect(self._on_graph_finished)
+        self._graph_worker.cancelled.connect(self._on_graph_cancelled)
         self._graph_worker.error.connect(self._on_graph_error)
         self._graph_worker.finished.connect(self._graph_thread.quit)
+        self._graph_worker.cancelled.connect(self._graph_thread.quit)
         self._graph_worker.error.connect(self._graph_thread.quit)
-        self._graph_thread.finished.connect(progress.close)
+        self._graph_thread.finished.connect(lambda: self._graph_panel.set_intel_running(False))
 
         self._graph_thread.start()
 
+    def _cancel_intelligent_skeleton(self) -> None:
+        if self._graph_worker is not None:
+            self._graph_panel.set_intel_progress("Cancelling… (waiting for current stage)")
+            self._graph_worker.request_cancel()
+
     def _on_graph_finished(self, graph) -> None:
-        # Accumulate: merge new graph onto whatever was already extracted
         if self._skeleton is not None:
             graph = merge_graphs(self._skeleton, graph)
         self._skeleton = graph
         self._viewport.set_skeleton(graph)
         self._graph_panel.set_stats(len(graph.nodes), len(graph.edges))
-        self._graph_thread.deleteLater()
-        self._graph_thread = None
+        self._graph_worker = None
+
+    def _on_graph_cancelled(self) -> None:
+        self._graph_worker = None
 
     def _on_graph_error(self, msg: str) -> None:
         QMessageBox.critical(self, "Extraction error", f"pcd_graph_recon failed:\n{msg}")
-        if self._graph_thread:
-            self._graph_thread.deleteLater()
-            self._graph_thread = None
+        self._graph_worker = None
 
     def _export_graph(self) -> None:
         if self._skeleton is None:
@@ -530,6 +692,123 @@ class MainWindow(QMainWindow):
         self._skeleton = None
         self._viewport.clear_skeleton()
         self._graph_panel.clear_stats()
+        self._skel_editor.set_node_stats(0, 0)
+        # Exit skeleton edit mode so controls reset cleanly
+        if self._viewport.skeleton_edit_mode:
+            self._viewport.skeleton_edit_mode = False
+            self._skel_editor.set_edit_mode(False)
+
+    # ── Skeleton node editor ──────────────────────────────────────────────────
+
+    def _on_skel_edit_mode_changed(self, active: bool) -> None:
+        self._viewport.skeleton_edit_mode = active
+        if active:
+            if self._skeleton is None or len(self._skeleton.nodes) == 0:
+                self._skel_editor.set_edit_mode(False)
+                self._viewport.skeleton_edit_mode = False
+                QMessageBox.information(self, "No skeleton",
+                                        "Import or extract a skeleton first.")
+                return
+            self._viewport.reset_skel_selection()
+            n = len(self._skeleton.nodes)
+            self._skel_editor.set_node_stats(0, n)
+            self._skel_editor._set_controls_enabled(True)
+        else:
+            self._viewport._skel_selection = None
+            self._skel_editor.set_node_stats(0,
+                len(self._skeleton.nodes) if self._skeleton else 0)
+            self._skel_editor._set_controls_enabled(False)
+
+    def _on_skel_selection_changed(self) -> None:
+        if self._skeleton is None or self._viewport._skel_selection is None:
+            return
+        n_sel   = int(self._viewport._skel_selection.sum())
+        n_total = len(self._skeleton.nodes)
+        self._skel_editor.set_node_stats(n_sel, n_total)
+
+    def _skel_select_all(self) -> None:
+        if self._viewport._skel_selection is None:
+            return
+        self._viewport._skel_selection[:] = True
+        self._viewport._upload_skel_selection()
+        self._viewport.skel_selection_changed.emit()
+
+    def _skel_deselect_all(self) -> None:
+        if self._viewport._skel_selection is None:
+            return
+        self._viewport._skel_selection[:] = False
+        self._viewport._upload_skel_selection()
+        self._viewport.skel_selection_changed.emit()
+
+    def _reextract_selected_skel_nodes(self) -> None:
+        if self._skeleton is None or self._viewport._skel_selection is None:
+            return
+        mask         = self._viewport._skel_selection
+        selected_idx = np.where(mask)[0]
+        if len(selected_idx) < 2:
+            QMessageBox.warning(self, "Too few nodes",
+                                "Select at least 2 skeleton nodes.")
+            return
+
+        selected_pos = self._skeleton.nodes[selected_idx]
+        k = self._skel_editor.get_k_neighbors()
+        k_actual = min(k, len(selected_idx) - 1)
+
+        # Build k-NN edges and MST on just the selected positions (no voxelization,
+        # since the skeleton nodes are already sparse and we want to keep them as-is).
+        edge_list = _build_knn_edges(selected_pos, k_actual)
+        mst_local = _kruskal_mst(len(selected_pos), edge_list)
+
+        # Map local MST edge indices back to global skeleton node indices
+        new_edges = [(int(selected_idx[u]), int(selected_idx[v]))
+                     for u, v in mst_local]
+
+        # Keep only existing edges where NOT both endpoints are selected
+        selected_set = set(selected_idx.tolist())
+        kept_edges = [
+            (int(u), int(v)) for u, v in self._skeleton.edges
+            if not (u in selected_set and v in selected_set)
+        ]
+
+        all_edges = kept_edges + new_edges
+        edges_arr = (np.array(all_edges, dtype=np.int32) if all_edges
+                     else np.empty((0, 2), dtype=np.int32))
+
+        self._skeleton = StrandGraph(
+            nodes=self._skeleton.nodes.copy(),
+            edges=edges_arr,
+        )
+        self._viewport.set_skeleton(self._skeleton)
+        # Reset selection to reflect the (unchanged) node set
+        self._viewport.reset_skel_selection()
+        self._graph_panel.set_stats(len(self._skeleton.nodes), len(self._skeleton.edges))
+
+    def _delete_selected_skel_nodes(self) -> None:
+        if self._skeleton is None or self._viewport._skel_selection is None:
+            return
+        mask        = self._viewport._skel_selection
+        selected_set = set(np.where(mask)[0].tolist())
+        kept_idx    = np.where(~mask)[0]
+
+        if len(kept_idx) == 0:
+            self._clear_skeleton()
+            return
+
+        remap     = {int(old): new for new, old in enumerate(kept_idx)}
+        new_nodes = self._skeleton.nodes[kept_idx]
+
+        new_edges_list = [
+            (remap[int(u)], remap[int(v)])
+            for u, v in self._skeleton.edges
+            if int(u) not in selected_set and int(v) not in selected_set
+        ]
+        new_edges = (np.array(new_edges_list, dtype=np.int32) if new_edges_list
+                     else np.empty((0, 2), dtype=np.int32))
+
+        self._skeleton = StrandGraph(nodes=new_nodes, edges=new_edges)
+        self._viewport.set_skeleton(self._skeleton)
+        self._viewport.reset_skel_selection()
+        self._graph_panel.set_stats(len(self._skeleton.nodes), len(self._skeleton.edges))
 
     # ── Merge / Align actions ─────────────────────────────────────────────────
 
@@ -892,10 +1171,16 @@ class MainWindow(QMainWindow):
                 self._viewport.toggle_fps_mode()
                 return True          # consume — prevent Qt focus-tab navigation
             if key in (int(Qt.Key.Key_Delete), int(Qt.Key.Key_Q)):
-                self._delete_selected()
+                if self._viewport.skeleton_edit_mode:
+                    self._delete_selected_skel_nodes()
+                else:
+                    self._delete_selected()
                 return True
             if key == int(Qt.Key.Key_G):
-                self._extract_skeleton()
+                if self._viewport.skeleton_edit_mode:
+                    self._reextract_selected_skel_nodes()
+                else:
+                    self._extract_skeleton()
                 return True
             if key == int(Qt.Key.Key_Home):
                 self._viewport.reset_camera()
