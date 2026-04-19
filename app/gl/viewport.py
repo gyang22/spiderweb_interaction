@@ -167,11 +167,12 @@ class GLViewport(QOpenGLWidget):
         if self.skeleton_renderer is None:
             return
         self._skel_nodes = graph.nodes.copy() if len(graph.nodes) > 0 else None
+        first_upload = not (self.skeleton_renderer and self.skeleton_renderer.has_data)
         self.makeCurrent()
         self.skeleton_renderer.upload(graph)
         self.doneCurrent()
-        # If no PCD is loaded, frame the camera on the skeleton and start the timer
-        if not self.has_point_cloud() and len(graph.nodes) > 0:
+        # If no PCD is loaded and this is the first skeleton upload, frame the camera
+        if not self.has_point_cloud() and first_upload and len(graph.nodes) > 0:
             self._frame_on_skeleton(graph.nodes)
         self.update()
 

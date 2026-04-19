@@ -84,15 +84,8 @@ class _GraphWorker(QObject):
         import dmpcd as dm
         from pcd_graph_recon.api import (
             filter_marker2_by_detour, edge_length_percentile_filter,
+            MomentumConnect,
         )
-        try:
-            from MomentumConnect import MomentumConnect
-        except ImportError:
-            import sys as _sys
-            _sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(
-                __import__('pcd_graph_recon').__file__
-            ))))
-            from MomentumConnect import MomentumConnect
 
         tmpdir = tempfile.mkdtemp(prefix="spiderweb_skel_")
         try:
