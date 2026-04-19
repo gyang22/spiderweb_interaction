@@ -102,6 +102,7 @@ class PcdSelectorDialog(QDialog):
         self.setWindowTitle("Open Point Cloud")
         self.resize(820, 560)
         self.selected_path: Path | None = None
+        self.import_json_requested: bool = False
 
         self._root = _DEFAULT_ROOT
         self._data, self._structured = _scan(self._root)
@@ -183,6 +184,15 @@ class PcdSelectorDialog(QDialog):
         root_layout.addWidget(splitter, stretch=1)
 
         # Button row
+        btn_row = QHBoxLayout()
+
+        btn_import_json = QPushButton("Import Skeleton JSON…")
+        btn_import_json.setToolTip("Skip PCD selection and import a skeleton graph from JSON.")
+        btn_import_json.clicked.connect(self._on_import_json)
+        btn_row.addWidget(btn_import_json)
+
+        btn_row.addStretch()
+
         btn_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Open |
             QDialogButtonBox.StandardButton.Cancel
@@ -191,7 +201,13 @@ class PcdSelectorDialog(QDialog):
         self._open_btn.setEnabled(False)
         btn_box.accepted.connect(self._accept_current)
         btn_box.rejected.connect(self.reject)
-        root_layout.addWidget(btn_box)
+        btn_row.addWidget(btn_box)
+
+        root_layout.addLayout(btn_row)
+
+    def _on_import_json(self) -> None:
+        self.import_json_requested = True
+        self.accept()
 
     # ── Folder navigation ─────────────────────────────────────────────────────
 

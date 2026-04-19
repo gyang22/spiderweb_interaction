@@ -396,6 +396,9 @@ class MainWindow(QMainWindow):
         dlg = PcdSelectorDialog(self)
         if dlg.exec() != PcdSelectorDialog.DialogCode.Accepted:
             return
+        if dlg.import_json_requested:
+            self._import_graph()
+            return
         if dlg.selected_path is None:
             return
         self._load_path(str(dlg.selected_path))

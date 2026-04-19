@@ -170,7 +170,35 @@ class GLViewport(QOpenGLWidget):
         self.makeCurrent()
         self.skeleton_renderer.upload(graph)
         self.doneCurrent()
+        # If no PCD is loaded, frame the camera on the skeleton and start the timer
+        if not self.has_point_cloud() and len(graph.nodes) > 0:
+            self._frame_on_skeleton(graph.nodes)
         self.update()
+
+    def _frame_on_skeleton(self, nodes: np.ndarray) -> None:
+        """Position camera to view the skeleton when no PCD is present."""
+        center = nodes.mean(axis=0)
+        extent = float(np.ptp(nodes, axis=0).max())
+        extent = max(extent, 1e-3)
+
+        self.camera.position     = (center + np.array([0.0, 0.0, extent * 2.0],
+                                                       dtype=np.float32))
+        self.camera.yaw          = 0.0
+        self.camera.pitch        = 0.0
+        self.camera.move_speed   = extent * 0.5
+        self.camera.acceleration = self.camera.move_speed * self.camera.damping
+        self.camera.near         = extent * 1e-3
+        self.camera.far          = extent * 1000.0
+
+        self._home_position     = self.camera.position.copy()
+        self._home_yaw          = self.camera.yaw
+        self._home_pitch        = self.camera.pitch
+        self._home_speed        = self.camera.move_speed
+        self._home_acceleration = self.camera.acceleration
+
+        if not self._timer.isActive():
+            self.tool_manager.enable()
+            self._timer.start()
 
     def clear_skeleton(self) -> None:
         """Remove the skeleton overlay."""
