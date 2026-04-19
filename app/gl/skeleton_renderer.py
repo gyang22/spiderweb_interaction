@@ -45,7 +45,7 @@ class SkeletonRenderer:
         self.line_width:     float = 2.0
         self.node_color:     tuple = (1.0, 0.8, 0.0, 1.0)    # gold
         self.edge_color:     tuple = (0.6, 0.9, 1.0, 0.85)   # light blue
-        self.selected_color: tuple = (1.0, 1.0, 1.0, 1.0)    # white
+        self.selected_color: tuple = (1.0, 0.15, 0.15, 1.0)   # red
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 

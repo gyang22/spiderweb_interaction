@@ -54,7 +54,7 @@ class GraphPanel(QDockWidget):
         self._spin_ds_voxel = QDoubleSpinBox()
         self._spin_ds_voxel.setRange(1e-6, 9999.0)
         self._spin_ds_voxel.setDecimals(4)
-        self._spin_ds_voxel.setValue(0.01)
+        self._spin_ds_voxel.setValue(5.0)
         self._spin_ds_voxel.setEnabled(False)
         self._spin_ds_voxel.setToolTip(
             "Voxel edge length used for downsampling.\n"
@@ -95,7 +95,7 @@ class GraphPanel(QDockWidget):
         self._spin_voxel = QDoubleSpinBox()
         self._spin_voxel.setRange(1e-4, 9999.0)
         self._spin_voxel.setDecimals(4)
-        self._spin_voxel.setValue(0.01)
+        self._spin_voxel.setValue(5.0)
         self._spin_voxel.setEnabled(False)
         self._spin_voxel.setToolTip(
             "Grid cell size for skeleton downsampling.\n"
@@ -175,6 +175,24 @@ class GraphPanel(QDockWidget):
         intel_group = QGroupBox("Intelligent Skeleton (pcd_graph_recon)")
         intel_layout = QVBoxLayout(intel_group)
         intel_layout.setSpacing(6)
+
+        self._chk_intel_auto = QCheckBox("Auto voxel size")
+        self._chk_intel_auto.setChecked(False)
+        self._chk_intel_auto.toggled.connect(self._on_intel_auto_toggled)
+        intel_layout.addWidget(self._chk_intel_auto)
+
+        intel_vox_row = QHBoxLayout()
+        intel_vox_row.addWidget(QLabel("Voxel size:"))
+        self._spin_intel_voxel = QDoubleSpinBox()
+        self._spin_intel_voxel.setRange(1e-4, 9999.0)
+        self._spin_intel_voxel.setDecimals(4)
+        self._spin_intel_voxel.setValue(5.0)
+        self._spin_intel_voxel.setToolTip(
+            "Voxel size used to downsample the selection before graph reconstruction.\n"
+            "Auto = selection extent / 40."
+        )
+        intel_vox_row.addWidget(self._spin_intel_voxel)
+        intel_layout.addLayout(intel_vox_row)
 
         tau_row = QHBoxLayout()
         tau_row.addWidget(QLabel("Tau detour:"))
@@ -268,6 +286,10 @@ class GraphPanel(QDockWidget):
     def get_prune_factor(self) -> float:
         return self._spin_prune.value()
 
+    def get_intel_voxel_size(self) -> float | None:
+        """None = auto (extent / 40), otherwise the spinbox value."""
+        return None if self._chk_intel_auto.isChecked() else self._spin_intel_voxel.value()
+
     def get_tau_detour(self) -> float:
         return self._spin_tau_detour.value()
 
@@ -289,6 +311,9 @@ class GraphPanel(QDockWidget):
         self._lbl_intel_status.setText(text)
 
     # ── private ───────────────────────────────────────────────────────────────
+
+    def _on_intel_auto_toggled(self, checked: bool) -> None:
+        self._spin_intel_voxel.setEnabled(not checked)
 
     def _on_ds_auto_toggled(self, checked: bool) -> None:
         self._spin_ds_voxel.setEnabled(not checked)

@@ -30,6 +30,7 @@ from app.data.pcd_io import load_pcd, save_pcd
 from app.data.ply_export import export_ply
 from app.data.strand_graph import (
     extract_skeleton, merge_graphs, merge_graphs_with_bridges, StrandGraph,
+    clean as clean_graph, degree_counts,
     _build_knn_edges, _kruskal_mst,
 )
 from app.data.graph_io import export_graph_json, import_graph_json
@@ -37,6 +38,7 @@ from app.data.downsample import voxel_downsample
 from app.data.align import icp_align, cpd_align, euler_to_transform
 from app.data.point_cloud import PointCloud
 from app.commands.replace_cloud_command import ReplaceCloudCommand
+from app.commands.edit_skeleton_command import EditSkeletonCommand
 from app.widgets.pcd_selector import PcdSelectorDialog
 from app import settings
 
@@ -305,6 +307,7 @@ class MainWindow(QMainWindow):
         self._skel_editor.edit_mode_changed.connect(self._on_skel_edit_mode_changed)
         self._skel_editor.select_all_clicked.connect(self._skel_select_all)
         self._skel_editor.deselect_all_clicked.connect(self._skel_deselect_all)
+        self._skel_editor.select_by_degree_clicked.connect(self._skel_select_by_degree)
         self._skel_editor.reextract_clicked.connect(self._reextract_selected_skel_nodes)
         self._skel_editor.delete_nodes_clicked.connect(self._delete_selected_skel_nodes)
         self._viewport.skel_selection_changed.connect(self._on_skel_selection_changed)
@@ -455,7 +458,7 @@ class MainWindow(QMainWindow):
         if self._pc is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save PCD file", str(settings.SAVES_DIR), "Point Cloud (*.pcd)"
+            self, "Save PCD file", settings.default_dir(), "Point Cloud (*.pcd)"
         )
         if not path:
             return
@@ -468,7 +471,7 @@ class MainWindow(QMainWindow):
         if self._pc is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export PLY", str(settings.SAVES_DIR), "PLY file (*.ply)"
+            self, "Export PLY", settings.default_dir(), "PLY file (*.ply)"
         )
         if not path:
             return
@@ -569,12 +572,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Extraction error", str(exc))
             return
 
-        # Merge into existing skeleton, bridging new nodes to nearby existing ones.
         if self._skeleton is not None:
             graph = merge_graphs_with_bridges(self._skeleton, graph)
-        self._skeleton = graph
-        self._viewport.set_skeleton(self._skeleton)
-        self._graph_panel.set_stats(len(self._skeleton.nodes), len(self._skeleton.edges))
+        self._set_skeleton(graph)
 
     def _extract_intelligent_skeleton(self) -> None:
         if not _HAS_GRAPH_RECON:
@@ -602,7 +602,7 @@ class MainWindow(QMainWindow):
             # open3d expects (N, 3) for colors, but PointCloud stores (N, 4) RGBA
             o3d_pc.colors = o3d.utility.Vector3dVector(colors[:, :3].astype(np.float64))
 
-        voxel_size = self._graph_panel.get_voxel_size()   # None = auto
+        voxel_size = self._graph_panel.get_intel_voxel_size()   # None = auto
         tau_detour = self._graph_panel.get_tau_detour()
         keep_tau = self._graph_panel.get_keep_tau()
         persist_thresh = self._graph_panel.get_persistence_threshold()
@@ -636,9 +636,7 @@ class MainWindow(QMainWindow):
     def _on_graph_finished(self, graph) -> None:
         if self._skeleton is not None:
             graph = merge_graphs(self._skeleton, graph)
-        self._skeleton = graph
-        self._viewport.set_skeleton(graph)
-        self._graph_panel.set_stats(len(graph.nodes), len(graph.edges))
+        self._set_skeleton(graph)
         self._graph_worker = None
 
     def _on_graph_cancelled(self) -> None:
@@ -654,7 +652,7 @@ class MainWindow(QMainWindow):
                                     "Extract a skeleton first before exporting.")
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Skeleton JSON", str(settings.SAVES_DIR), "JSON file (*.json)"
+            self, "Export Skeleton JSON", settings.default_dir(), "JSON file (*.json)"
         )
         if not path:
             return
@@ -665,7 +663,7 @@ class MainWindow(QMainWindow):
 
     def _import_graph(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import Skeleton JSON", str(settings.SAVES_DIR), "JSON file (*.json);;All files (*)"
+            self, "Import Skeleton JSON", settings.default_dir(), "JSON file (*.json);;All files (*)"
         )
         if not path:
             return
@@ -677,16 +675,25 @@ class MainWindow(QMainWindow):
                 maxs = graph.nodes.max(axis=0)
                 print(f"Graph bounding box: min={mins}, max={maxs}")
             
-            # Accumulate: merge new graph onto whatever was already extracted/imported
             if self._skeleton is not None:
                 graph = merge_graphs(self._skeleton, graph)
-            self._skeleton = graph
-            self._viewport.set_skeleton(graph)
-            self._graph_panel.set_stats(len(graph.nodes), len(graph.edges))
+            self._set_skeleton(graph)
         except Exception as exc:
             QMessageBox.critical(self, "Import error", str(exc))
             import traceback
             traceback.print_exc()
+
+    def _set_skeleton(self, graph: StrandGraph) -> None:
+        """Clean, store, render, and update all stats for a new skeleton."""
+        graph = clean_graph(graph)
+        self._skeleton = graph
+        self._viewport.set_skeleton(graph)
+        self._graph_panel.set_stats(len(graph.nodes), len(graph.edges))
+        self._skel_editor.set_degree_stats(degree_counts(graph))
+        # Refresh selection mask size if edit mode is active
+        if self._viewport.skeleton_edit_mode:
+            self._viewport.reset_skel_selection()
+            self._skel_editor.set_node_stats(0, len(graph.nodes))
 
     def _clear_skeleton(self) -> None:
         self._skeleton = None
@@ -725,6 +732,23 @@ class MainWindow(QMainWindow):
         n_sel   = int(self._viewport._skel_selection.sum())
         n_total = len(self._skeleton.nodes)
         self._skel_editor.set_node_stats(n_sel, n_total)
+
+    def _skel_select_by_degree(self, degree: int) -> None:
+        if self._skeleton is None or self._viewport._skel_selection is None:
+            return
+        n = len(self._skeleton.nodes)
+        counts = np.zeros(n, dtype=np.int32)
+        # Deduplicate edges (normalise to min,max) so (u,v) and (v,u) aren't double-counted
+        seen: set[tuple[int, int]] = set()
+        for u, v in self._skeleton.edges:
+            key = (min(int(u), int(v)), max(int(u), int(v)))
+            if key not in seen:
+                seen.add(key)
+                counts[key[0]] += 1
+                counts[key[1]] += 1
+        self._viewport._skel_selection[:] = counts == degree
+        self._viewport._upload_skel_selection()
+        self._viewport.skel_selection_changed.emit()
 
     def _skel_select_all(self) -> None:
         if self._viewport._skel_selection is None:
@@ -774,21 +798,22 @@ class MainWindow(QMainWindow):
         edges_arr = (np.array(all_edges, dtype=np.int32) if all_edges
                      else np.empty((0, 2), dtype=np.int32))
 
-        self._skeleton = StrandGraph(
+        old_skeleton = self._skeleton
+        new_skeleton = StrandGraph(
             nodes=self._skeleton.nodes.copy(),
             edges=edges_arr,
         )
-        self._viewport.set_skeleton(self._skeleton)
-        # Reset selection to reflect the (unchanged) node set
+        cmd = EditSkeletonCommand(old_skeleton, new_skeleton, self._set_skeleton,
+                                  "Re-extract skeleton connectivity")
+        self._undo_stack.push(cmd)
         self._viewport.reset_skel_selection()
-        self._graph_panel.set_stats(len(self._skeleton.nodes), len(self._skeleton.edges))
 
     def _delete_selected_skel_nodes(self) -> None:
         if self._skeleton is None or self._viewport._skel_selection is None:
             return
-        mask        = self._viewport._skel_selection
+        mask         = self._viewport._skel_selection
         selected_set = set(np.where(mask)[0].tolist())
-        kept_idx    = np.where(~mask)[0]
+        kept_idx     = np.where(~mask)[0]
 
         if len(kept_idx) == 0:
             self._clear_skeleton()
@@ -805,10 +830,12 @@ class MainWindow(QMainWindow):
         new_edges = (np.array(new_edges_list, dtype=np.int32) if new_edges_list
                      else np.empty((0, 2), dtype=np.int32))
 
-        self._skeleton = StrandGraph(nodes=new_nodes, edges=new_edges)
-        self._viewport.set_skeleton(self._skeleton)
+        old_skeleton = self._skeleton
+        new_skeleton = StrandGraph(nodes=new_nodes, edges=new_edges)
+        cmd = EditSkeletonCommand(old_skeleton, new_skeleton, self._set_skeleton,
+                                  "Delete skeleton nodes")
+        self._undo_stack.push(cmd)
         self._viewport.reset_skel_selection()
-        self._graph_panel.set_stats(len(self._skeleton.nodes), len(self._skeleton.edges))
 
     # ── Merge / Align actions ─────────────────────────────────────────────────
 
@@ -1025,8 +1052,7 @@ class MainWindow(QMainWindow):
         self._undo_stack.push(cmd)
 
     def _apply_skeleton_from_command(self, skeleton) -> None:
-        self._skeleton = skeleton
-        self._viewport.set_skeleton(skeleton)
+        self._set_skeleton(skeleton)
         self._graph_panel.set_stats(len(skeleton.nodes), len(skeleton.edges))
 
     def _delete_selected(self) -> None:

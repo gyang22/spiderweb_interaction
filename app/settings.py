@@ -5,6 +5,11 @@ from pathlib import Path
 # All file saves go here — the directory is created at startup if absent
 SAVES_DIR: Path = Path(__file__).parent.parent / "saves"
 
+
+def default_dir() -> str:
+    """Return SAVES_DIR if it exists, otherwise the user's home directory."""
+    return str(SAVES_DIR if SAVES_DIR.exists() else Path.home())
+
 SELECTION_COLOR = (1.0, 0.5, 0.0, 1.0)   # orange highlight for selected points
 DEFAULT_POINT_COLOR = (0.7, 0.7, 0.7, 1.0)  # neutral gray when no RGB in file
 DEFAULT_POINT_SIZE = 4.0

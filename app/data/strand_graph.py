@@ -23,6 +23,49 @@ class StrandGraph:
     edges: np.ndarray   # (E, 2) int32
 
 
+def clean(graph: StrandGraph) -> StrandGraph:
+    """
+    Return a new StrandGraph with self-loops and duplicate edges removed.
+    Each undirected edge is stored exactly once as (min, max).
+    """
+    seen: set[tuple[int, int]] = set()
+    clean_edges: list[tuple[int, int]] = []
+    for u, v in graph.edges:
+        u, v = int(u), int(v)
+        if u == v:
+            continue
+        key = (min(u, v), max(u, v))
+        if key not in seen:
+            seen.add(key)
+            clean_edges.append(key)
+    edges = (np.array(clean_edges, dtype=np.int32) if clean_edges
+             else np.empty((0, 2), dtype=np.int32))
+    return StrandGraph(nodes=graph.nodes.copy(), edges=edges)
+
+
+def degree_counts(graph: StrandGraph) -> dict[int, int]:
+    """
+    Return a dict mapping degree → number of nodes with that degree,
+    sorted by degree.  Edges are deduplicated before counting.
+    """
+    n = len(graph.nodes)
+    if n == 0:
+        return {}
+    counts = np.zeros(n, dtype=np.int32)
+    seen: set[tuple[int, int]] = set()
+    for u, v in graph.edges:
+        u, v = int(u), int(v)
+        key = (min(u, v), max(u, v))
+        if key not in seen:
+            seen.add(key)
+            counts[u] += 1
+            counts[v] += 1
+    result: dict[int, int] = {}
+    for deg in np.unique(counts):
+        result[int(deg)] = int((counts == deg).sum())
+    return result
+
+
 def merge_graphs(g1: StrandGraph, g2: StrandGraph) -> StrandGraph:
     """
     Combine two StrandGraphs by concatenating their nodes and edges.

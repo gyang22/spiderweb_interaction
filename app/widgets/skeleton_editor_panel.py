@@ -10,11 +10,12 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 
 class SkeletonEditorPanel(QDockWidget):
-    edit_mode_changed    = pyqtSignal(bool)
-    select_all_clicked   = pyqtSignal()
-    deselect_all_clicked = pyqtSignal()
-    reextract_clicked    = pyqtSignal()
-    delete_nodes_clicked = pyqtSignal()
+    edit_mode_changed      = pyqtSignal(bool)
+    select_all_clicked     = pyqtSignal()
+    deselect_all_clicked   = pyqtSignal()
+    select_by_degree_clicked = pyqtSignal(int)
+    reextract_clicked      = pyqtSignal()
+    delete_nodes_clicked   = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__("Skeleton Node Editor", parent)
@@ -64,6 +65,31 @@ class SkeletonEditorPanel(QDockWidget):
 
         layout.addWidget(sel_group)
 
+        # ── Select by degree ──────────────────────────────────────────────────
+        deg_group = QGroupBox("Select by degree")
+        deg_layout = QHBoxLayout(deg_group)
+        deg_layout.setSpacing(6)
+
+        deg_layout.addWidget(QLabel("Degree ="))
+        self._spin_degree = QSpinBox()
+        self._spin_degree.setRange(0, 999)
+        self._spin_degree.setValue(1)
+        self._spin_degree.setToolTip(
+            "Select all skeleton nodes with exactly this many connected edges.\n"
+            "Degree 1 = leaf/endpoint nodes, degree 0 = isolated nodes."
+        )
+        deg_layout.addWidget(self._spin_degree)
+
+        self._btn_sel_degree = QPushButton("Select")
+        self._btn_sel_degree.setFixedHeight(28)
+        self._btn_sel_degree.setToolTip("Select all nodes whose edge count equals the degree value.")
+        self._btn_sel_degree.clicked.connect(
+            lambda: self.select_by_degree_clicked.emit(self._spin_degree.value())
+        )
+        deg_layout.addWidget(self._btn_sel_degree)
+
+        layout.addWidget(deg_group)
+
         # ── Re-extract connectivity ───────────────────────────────────────────
         reex_group = QGroupBox("Re-extract connectivity")
         reex_layout = QVBoxLayout(reex_group)
@@ -102,6 +128,20 @@ class SkeletonEditorPanel(QDockWidget):
         self._btn_delete.clicked.connect(self.delete_nodes_clicked)
         layout.addWidget(self._btn_delete)
 
+        # ── Degree distribution ───────────────────────────────────────────────
+        stats_group = QGroupBox("Degree distribution")
+        stats_layout = QVBoxLayout(stats_group)
+        stats_layout.setSpacing(2)
+
+        self._lbl_deg_stats = QLabel("—")
+        self._lbl_deg_stats.setStyleSheet(
+            "color: #aaa; font-size: 11px; font-family: monospace; padding: 2px 0;"
+        )
+        self._lbl_deg_stats.setWordWrap(True)
+        stats_layout.addWidget(self._lbl_deg_stats)
+
+        layout.addWidget(stats_group)
+
         layout.addStretch()
         self.setWidget(root)
 
@@ -114,6 +154,15 @@ class SkeletonEditorPanel(QDockWidget):
             self._lbl_stats.setText("No skeleton loaded")
         else:
             self._lbl_stats.setText(f"Selected: {selected} / {total} nodes")
+
+    def set_degree_stats(self, deg_counts: dict[int, int]) -> None:
+        """Display degree → node count mapping."""
+        if not deg_counts:
+            self._lbl_deg_stats.setText("—")
+            return
+        lines = [f"deg {d}: {c} node{'s' if c != 1 else ''}"
+                 for d, c in sorted(deg_counts.items())]
+        self._lbl_deg_stats.setText("\n".join(lines))
 
     def get_k_neighbors(self) -> int:
         return self._spin_k.value()
@@ -128,6 +177,6 @@ class SkeletonEditorPanel(QDockWidget):
     # ── private ───────────────────────────────────────────────────────────────
 
     def _set_controls_enabled(self, enabled: bool) -> None:
-        for w in (self._btn_sel_all, self._btn_desel,
+        for w in (self._btn_sel_all, self._btn_desel, self._btn_sel_degree,
                   self._btn_reextract, self._btn_delete):
             w.setEnabled(enabled)
