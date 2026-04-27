@@ -15,7 +15,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QDoubleSpinBox, QSpinBox,
-    QGroupBox,
+    QGroupBox, QScrollArea,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -27,6 +27,10 @@ class MergePanel(QDockWidget):
     switch_active_clicked   = pyqtSignal()   # toggle which cloud is being edited
     run_icp_clicked         = pyqtSignal()
     run_cpd_clicked         = pyqtSignal()
+    run_webmerge_clicked    = pyqtSignal()
+    anchor_mode_toggled     = pyqtSignal(bool)
+    apply_warp_clicked      = pyqtSignal()
+    auto_match_clicked      = pyqtSignal()
     merge_clicked           = pyqtSignal()
 
     # Fired whenever any manual-transform spinbox changes.
@@ -155,6 +159,103 @@ class MergePanel(QDockWidget):
 
         layout.addWidget(icp_group)
 
+        # ══ WebMerge Pipeline ══════════════════════════════════════════════════
+        webmerge_group = QGroupBox("WebMerge Pipeline")
+        webmerge_layout = QVBoxLayout(webmerge_group)
+        webmerge_layout.setSpacing(4)
+        
+        self._spin_wm_radius = QDoubleSpinBox()
+        self._spin_wm_radius.setRange(0.1, 1000.0)
+        self._spin_wm_radius.setValue(20.0)
+        self._spin_wm_radius.setSingleStep(1.0)
+        self._spin_wm_radius.setDecimals(1)
+        r_layout = QHBoxLayout()
+        r_layout.addWidget(QLabel("Search Rad:"))
+        r_layout.addWidget(self._spin_wm_radius)
+        webmerge_layout.addLayout(r_layout)
+        
+        self._spin_wm_vote = QSpinBox()
+        self._spin_wm_vote.setRange(1, 50)
+        self._spin_wm_vote.setValue(5)
+        v_layout = QHBoxLayout()
+        v_layout.addWidget(QLabel("Vote Steps:"))
+        v_layout.addWidget(self._spin_wm_vote)
+        webmerge_layout.addLayout(v_layout)
+        
+        self._spin_wm_step = QDoubleSpinBox()
+        self._spin_wm_step.setRange(0.1, 100.0)
+        self._spin_wm_step.setValue(2.5)
+        self._spin_wm_step.setSingleStep(0.5)
+        self._spin_wm_step.setDecimals(1)
+        s_layout = QHBoxLayout()
+        s_layout.addWidget(QLabel("Step Size:"))
+        s_layout.addWidget(self._spin_wm_step)
+        webmerge_layout.addLayout(s_layout)
+        
+        self._spin_wm_lam = QDoubleSpinBox()
+        self._spin_wm_lam.setRange(0.01, 1.0)
+        self._spin_wm_lam.setValue(0.4)
+        self._spin_wm_lam.setSingleStep(0.1)
+        l_layout = QHBoxLayout()
+        l_layout.addWidget(QLabel("Lap. Lam:"))
+        l_layout.addWidget(self._spin_wm_lam)
+        webmerge_layout.addLayout(l_layout)
+        
+        self._spin_wm_iter = QSpinBox()
+        self._spin_wm_iter.setRange(1, 200)
+        self._spin_wm_iter.setValue(30)
+        i_layout = QHBoxLayout()
+        i_layout.addWidget(QLabel("Lap. Iter:"))
+        i_layout.addWidget(self._spin_wm_iter)
+        webmerge_layout.addLayout(i_layout)
+        
+        self._btn_webmerge = QPushButton("Run WebMerge Pipeline")
+        self._btn_webmerge.setFixedHeight(32)
+        self._btn_webmerge.setEnabled(False)
+        self._btn_webmerge.setToolTip("Extract skeletons from both clouds and align them.")
+        self._btn_webmerge.clicked.connect(self.run_webmerge_clicked)
+        webmerge_layout.addWidget(self._btn_webmerge)
+        
+        self._lbl_webmerge_status = QLabel("")
+        self._lbl_webmerge_status.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._lbl_webmerge_status.setWordWrap(True)
+        webmerge_layout.addWidget(self._lbl_webmerge_status)
+        
+        layout.addWidget(webmerge_group)
+
+        # ══ Manual Anchor Warp ════════════════════════════════════════════════
+        manual_group = QGroupBox("Manual Anchor Warp")
+        manual_layout = QVBoxLayout(manual_group)
+        manual_layout.setSpacing(4)
+        
+        self._btn_anchor_mode = QPushButton("Enter Anchor Mode")
+        self._btn_anchor_mode.setCheckable(True)
+        self._btn_anchor_mode.setFixedHeight(32)
+        self._btn_anchor_mode.setEnabled(False)
+        self._btn_anchor_mode.setToolTip("Extract key anchors and enter manual pairing mode.")
+        self._btn_anchor_mode.toggled.connect(self.anchor_mode_toggled)
+        manual_layout.addWidget(self._btn_anchor_mode)
+        
+        self._lbl_anchor_status = QLabel("0 anchors paired")
+        self._lbl_anchor_status.setStyleSheet("color: #aaa; font-size: 11px;")
+        manual_layout.addWidget(self._lbl_anchor_status)
+        
+        self._btn_auto_match = QPushButton("Auto-Match Selected Regions")
+        self._btn_auto_match.setFixedHeight(32)
+        self._btn_auto_match.setEnabled(False)
+        self._btn_auto_match.setToolTip("Finds the best FPFH match between your selections on the Primary and Secondary clouds.")
+        self._btn_auto_match.clicked.connect(self.auto_match_clicked)
+        manual_layout.addWidget(self._btn_auto_match)
+        
+        self._btn_apply_warp = QPushButton("Apply TPS Warp")
+        self._btn_apply_warp.setFixedHeight(32)
+        self._btn_apply_warp.setEnabled(False)
+        self._btn_apply_warp.setToolTip("Non-rigidly stretch the secondary cloud to match the paired anchors.")
+        self._btn_apply_warp.clicked.connect(self.apply_warp_clicked)
+        manual_layout.addWidget(self._btn_apply_warp)
+        
+        layout.addWidget(manual_group)
+
         # ══ CPD (Non-rigid) ═══════════════════════════════════════════════════
         cpd_group = QGroupBox("CPD  (Non-rigid)")
         cpd_layout = QVBoxLayout(cpd_group)
@@ -210,7 +311,12 @@ class MergePanel(QDockWidget):
         layout.addWidget(self._btn_merge)
 
         layout.addStretch()
-        self.setWidget(root)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(root)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.setWidget(scroll)
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -240,6 +346,10 @@ class MergePanel(QDockWidget):
         self._lbl_editing.setText("")
         self._lbl_icp_result.setText("")
         self._lbl_cpd_status.setText("")
+        self._lbl_webmerge_status.setText("")
+        self._lbl_anchor_status.setText("0 anchors paired")
+        if self._btn_anchor_mode.isChecked():
+            self._btn_anchor_mode.setChecked(False)
         self._set_secondary_controls_enabled(False)
         self._reset_transform_silent()
 
@@ -248,6 +358,13 @@ class MergePanel(QDockWidget):
 
     def set_cpd_status(self, msg: str) -> None:
         self._lbl_cpd_status.setText(msg)
+
+    def set_webmerge_status(self, msg: str) -> None:
+        self._lbl_webmerge_status.setText(msg)
+
+    def set_anchor_status(self, pairs: int) -> None:
+        self._lbl_anchor_status.setText(f"{pairs} anchors paired")
+        self._btn_apply_warp.setEnabled(pairs > 0)
 
     def reset_transform_spinboxes(self) -> None:
         """Reset all transform spinboxes to zero without emitting transform_changed."""
@@ -259,6 +376,15 @@ class MergePanel(QDockWidget):
     def get_cpd_alpha(self) -> float:
         return self._spin_cpd_alpha.value()
 
+    def get_webmerge_params(self) -> dict:
+        return {
+            'search_radius': self._spin_wm_radius.value(),
+            'vote_steps': self._spin_wm_vote.value(),
+            'step_size': self._spin_wm_step.value(),
+            'lam': self._spin_wm_lam.value(),
+            'iterations': self._spin_wm_iter.value(),
+        }
+
     # ── private ───────────────────────────────────────────────────────────────
 
     def _set_secondary_controls_enabled(self, enabled: bool) -> None:
@@ -266,6 +392,9 @@ class MergePanel(QDockWidget):
         self._btn_switch.setEnabled(enabled)
         self._btn_icp.setEnabled(enabled)
         self._btn_cpd.setEnabled(enabled)
+        self._btn_webmerge.setEnabled(enabled)
+        self._btn_anchor_mode.setEnabled(enabled)
+        self._btn_auto_match.setEnabled(enabled)
         self._btn_merge.setEnabled(enabled)
         self._btn_reset_xform.setEnabled(enabled)
         self._spin_icp_iter.setEnabled(enabled)

@@ -58,6 +58,7 @@ class GLViewport(QOpenGLWidget):
         self.skeleton_renderer: SkeletonRenderer | None = None
         self._secondary_renderer: PointCloudRenderer | None = None
         self._secondary_transform: np.ndarray = np.eye(4, dtype=np.float32)
+        self._active_transform: np.ndarray = np.eye(4, dtype=np.float32)
         self.tool_manager = ToolManager(self)
         self.point_cloud  = None
 
@@ -379,6 +380,11 @@ class GLViewport(QOpenGLWidget):
         self._secondary_transform = np.asarray(T, dtype=np.float32)
         self.update()
 
+    def update_active_transform(self, T: np.ndarray) -> None:
+        """Set the 4×4 model transform applied to the active cloud."""
+        self._active_transform = np.asarray(T, dtype=np.float32)
+        self.update()
+
     def clear_reference(self) -> None:
         """Remove the reference overlay."""
         if self._secondary_renderer:
@@ -446,7 +452,8 @@ class GLViewport(QOpenGLWidget):
         py = int(round(y * sy))
         ph = self.picking.fbo_height
         self.makeCurrent()
-        self.picking.render(self.renderer, self.camera.get_mvp_matrix())
+        active_mvp = (self.camera.get_mvp_matrix() @ self._active_transform).astype(np.float32)
+        self.picking.render(self.renderer, active_mvp)
         idx = self.picking.read_pixel(px, ph - py - 1)
         self.doneCurrent()
         return idx
@@ -460,7 +467,8 @@ class GLViewport(QOpenGLWidget):
         x1p = int(round(x1 * sx));  x2p = int(round(x2 * sx))
         y1p = int(round(y1 * sy));  y2p = int(round(y2 * sy))
         self.makeCurrent()
-        self.picking.render(self.renderer, self.camera.get_mvp_matrix())
+        active_mvp = (self.camera.get_mvp_matrix() @ self._active_transform).astype(np.float32)
+        self.picking.render(self.renderer, active_mvp)
         rx1, rx2 = sorted([x1p, x2p])
         ry1 = ph - max(y1p, y2p) - 1
         ry2 = ph - min(y1p, y2p) - 1
@@ -473,7 +481,8 @@ class GLViewport(QOpenGLWidget):
         if not self.has_point_cloud():
             return None
         self.makeCurrent()
-        self.picking.render(self.renderer, self.camera.get_mvp_matrix())
+        active_mvp = (self.camera.get_mvp_matrix() @ self._active_transform).astype(np.float32)
+        self.picking.render(self.renderer, active_mvp)
         result = self.picking.read_full()
         self.doneCurrent()
         return result
@@ -491,7 +500,8 @@ class GLViewport(QOpenGLWidget):
         alive_idx = np.where(pc.alive_mask)[0].astype(np.int32)
         positions = pc.positions[alive_idx]   # (M, 3)
 
-        mvp = self.camera.get_mvp_matrix()    # (4, 4) row-major
+        base_mvp = self.camera.get_mvp_matrix()    # (4, 4) row-major
+        mvp = (base_mvp @ self._active_transform).astype(np.float32)
 
         # Homogeneous positions: (M, 4)
         ones = np.ones((len(positions), 1), dtype=np.float32)
@@ -564,13 +574,15 @@ class GLViewport(QOpenGLWidget):
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         mvp = self.camera.get_mvp_matrix()
+        active_mvp = (mvp @ self._active_transform).astype(np.float32)
+        
         if self.renderer and self.renderer.has_data:
-            self.renderer.draw(mvp)
+            self.renderer.draw(active_mvp)
         if self._secondary_renderer and self._secondary_renderer.has_data:
             sec_mvp = (mvp @ self._secondary_transform).astype(np.float32)
             self._secondary_renderer.draw(sec_mvp)
         if self.skeleton_renderer and self.skeleton_renderer.has_data:
-            self.skeleton_renderer.draw(mvp)
+            self.skeleton_renderer.draw(active_mvp)
 
         self._frame_count += 1
         if dt > 0:

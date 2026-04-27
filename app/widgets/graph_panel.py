@@ -5,7 +5,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QDoubleSpinBox, QSpinBox,
-    QGroupBox, QCheckBox,
+    QGroupBox, QCheckBox, QScrollArea,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -251,7 +251,12 @@ class GraphPanel(QDockWidget):
 
         layout.addWidget(intel_group)
         layout.addStretch()
-        self.setWidget(root)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(root)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.setWidget(scroll)
 
     # ── Downsample public API ─────────────────────────────────────────────────
 

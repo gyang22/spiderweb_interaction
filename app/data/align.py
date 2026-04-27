@@ -211,6 +211,98 @@ def icp_align(
     return T.astype(np.float32), rmse, n_inliers
 
 
+# ── WebMerge Align (Open3D-based, Z-axis sweep) ───────────────────────────────
+
+def webmerge_align(
+    source: np.ndarray,
+    target: np.ndarray,
+    init_transform: np.ndarray | None = None,
+    voxel_size: float = 5.0,
+    max_iter: int = 5000,
+) -> tuple[np.ndarray, float, int]:
+    """
+    Alignment backbone ported from WebMerge.
+    - Centers source and target.
+    - Performs 36-step (10 degree) Z-axis rotation sweep.
+    - Refines best match using Open3D ICP.
+    - Re-composes the full transformation matrix.
+    """
+    import open3d as o3d
+    
+    source = np.asarray(source, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    
+    s_pcd = o3d.geometry.PointCloud()
+    s_pcd.points = o3d.utility.Vector3dVector(source)
+    
+    t_pcd = o3d.geometry.PointCloud()
+    t_pcd.points = o3d.utility.Vector3dVector(target)
+    
+    if voxel_size is not None and voxel_size > 0:
+        s_pcd = s_pcd.voxel_down_sample(voxel_size)
+        t_pcd = t_pcd.voxel_down_sample(voxel_size)
+
+    s_center = s_pcd.get_center()
+    t_center = t_pcd.get_center()
+    
+    # Pre-apply the initial transform to source if provided
+    if init_transform is not None:
+        s_pcd.transform(init_transform.astype(np.float64))
+        # Recalculate center after init transform
+        s_center = s_pcd.get_center()
+        
+    s_temp = s_pcd.translate(-s_center)
+    t_temp = t_pcd.translate(-t_center)
+
+    best_fitness = -1.0
+    best_T = np.eye(4)
+    
+    # Coarse search: 10 degree steps around Z axis
+    for deg in range(0, 360, 10):
+        angle = np.radians(deg)
+        R = np.array([
+            [np.cos(angle), -np.sin(angle), 0], 
+            [np.sin(angle),  np.cos(angle), 0], 
+            [0,             0,              1]
+        ])
+        T_init = np.eye(4)
+        T_init[:3, :3] = R
+        reg = o3d.pipelines.registration.registration_icp(
+            s_temp, t_temp, 30.0, T_init, 
+            o3d.pipelines.registration.TransformationEstimationPointToPoint()
+        )
+        if reg.fitness > best_fitness:
+            best_fitness = reg.fitness
+            best_T = reg.transformation
+
+    # Fine refinement
+    reg_final = o3d.pipelines.registration.registration_icp(
+        s_temp, t_temp, 25.0, best_T, 
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iter)
+    )
+
+    # Compose final transform: Translate target center back, apply ICP, translate from source center
+    T_s_c = np.eye(4)
+    T_s_c[:3, 3] = -s_center
+    T_t_u = np.eye(4)
+    T_t_u[:3, 3] = t_center
+    
+    full_T_delta = T_t_u @ reg_final.transformation @ T_s_c
+    
+    # If we had an initial transform, the total transform is full_T_delta @ init_transform
+    if init_transform is not None:
+        final_T = full_T_delta @ init_transform.astype(np.float64)
+    else:
+        final_T = full_T_delta
+
+    # Calculate RMSE and inliers based on the refined registration
+    rmse = float(reg_final.inlier_rmse)
+    n_inliers = int(len(reg_final.correspondence_set))
+
+    return final_T.astype(np.float32), rmse, n_inliers
+
+
 # ── Non-rigid CPD alignment ───────────────────────────────────────────────────
 
 _CPD_SAMPLE_SIZE = 15_000   # random subsample used for CPD fitting (matches align_pcd.py)
@@ -397,3 +489,40 @@ def euler_to_transform(
     T[:3, :3] = R
     T[:3, 3]  = t_rot + np.array([tx, ty, tz], dtype=np.float64)
     return T
+
+def fpfh_match_regions(primary_pts: np.ndarray, secondary_pts: np.ndarray) -> tuple[int, int]:
+    """
+    Computes FPFH descriptors for two point subsets and returns the indices
+    of the best matching pair (primary_idx, secondary_idx).
+    """
+    import open3d as o3d
+    
+    # Estimate reasonable search radii based on the extent of the primary subset
+    extent = np.ptp(primary_pts, axis=0).max()
+    radius_normal = max(extent / 10.0, 1e-3)
+    radius_feature = max(extent / 4.0, 2e-3)
+    
+    pcd_p = o3d.geometry.PointCloud()
+    pcd_p.points = o3d.utility.Vector3dVector(primary_pts)
+    pcd_s = o3d.geometry.PointCloud()
+    pcd_s.points = o3d.utility.Vector3dVector(secondary_pts)
+    
+    # Estimate normals
+    pcd_p.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
+    pcd_s.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
+    
+    # Compute FPFH
+    fpfh_p = o3d.pipelines.registration.compute_fpfh_feature(
+        pcd_p, o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100))
+    fpfh_s = o3d.pipelines.registration.compute_fpfh_feature(
+        pcd_s, o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100))
+        
+    feat_p = np.asarray(fpfh_p.data).T  # (N, 33)
+    feat_s = np.asarray(fpfh_s.data).T  # (M, 33)
+    
+    # Find pair with minimum L2 distance
+    dists = np.linalg.norm(feat_p[:, None, :] - feat_s[None, :, :], axis=2)
+    min_idx = np.unravel_index(np.argmin(dists), dists.shape)
+    
+    return int(min_idx[0]), int(min_idx[1])
+

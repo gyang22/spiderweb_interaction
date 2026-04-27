@@ -35,7 +35,7 @@ from app.data.strand_graph import (
 )
 from app.data.graph_io import export_graph_json, import_graph_json
 from app.data.downsample import voxel_downsample
-from app.data.align import icp_align, cpd_align, euler_to_transform
+from app.data.align import icp_align, cpd_align, euler_to_transform, webmerge_align
 from app.data.point_cloud import PointCloud
 from app.commands.replace_cloud_command import ReplaceCloudCommand
 from app.commands.edit_skeleton_command import EditSkeletonCommand
@@ -219,6 +219,62 @@ class _GraphWorker(QObject):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class _WebMergeWorker(QObject):
+    finished = pyqtSignal(np.ndarray, float, int)  # T, rmse, n_inliers
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, pcd_primary, pcd_secondary, params):
+        super().__init__()
+        self._pcd_primary = pcd_primary
+        self._pcd_secondary = pcd_secondary
+        self._params = params
+
+    def run(self) -> None:
+        try:
+            from app.data.webmerge import webmerge_skeletonize
+            from app.data.align import webmerge_align
+
+            self.progress.emit("Skeletonizing primary cloud...")
+            skel_primary = webmerge_skeletonize(
+                self._pcd_primary.positions[self._pcd_primary.alive_mask],
+                search_radius=self._params['search_radius'],
+                vote_steps=self._params['vote_steps'],
+                step_size=self._params['step_size'],
+                lam=self._params['lam'],
+                iterations=self._params['iterations'],
+            )
+
+            self.progress.emit("Skeletonizing secondary cloud...")
+            skel_secondary = webmerge_skeletonize(
+                self._pcd_secondary.positions[self._pcd_secondary.alive_mask],
+                search_radius=self._params['search_radius'],
+                vote_steps=self._params['vote_steps'],
+                step_size=self._params['step_size'],
+                lam=self._params['lam'],
+                iterations=self._params['iterations'],
+            )
+            
+            if len(skel_primary) < 3 or len(skel_secondary) < 3:
+                raise ValueError("Skeletonization produced too few points to align.")
+
+            self.progress.emit("Aligning skeletons...")
+            T, rmse, inliers = webmerge_align(
+                source=skel_secondary,
+                target=skel_primary,
+                init_transform=None,
+                voxel_size=0.0, 
+                max_iter=5000,
+            )
+
+            self.finished.emit(T, rmse, inliers)
+
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.error.emit(str(exc))
+
+
 # ── MainWindow ─────────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -290,6 +346,10 @@ class MainWindow(QMainWindow):
         self._merge_panel.switch_active_clicked.connect(self._switch_active_cloud)
         self._merge_panel.run_icp_clicked.connect(self._run_icp)
         self._merge_panel.run_cpd_clicked.connect(self._run_cpd)
+        self._merge_panel.run_webmerge_clicked.connect(self._run_webmerge)
+        self._merge_panel.anchor_mode_toggled.connect(self._on_anchor_mode_toggled)
+        self._merge_panel.apply_warp_clicked.connect(self._apply_manual_warp)
+        self._merge_panel.auto_match_clicked.connect(self._auto_match_regions)
         self._merge_panel.merge_clicked.connect(self._merge_clouds)
         self._merge_panel.transform_changed.connect(self._on_manual_transform_changed)
 
@@ -880,12 +940,14 @@ class MainWindow(QMainWindow):
         if self._editing_secondary:
             # Secondary → active; primary → reference overlay (no transform)
             self._pc = self._pc_secondary
+            self._viewport.update_active_transform(self._secondary_alignment_T)
             self._viewport.reload_point_cloud(self._pc_secondary)
             if self._pc_primary is not None:
                 self._viewport.load_reference(self._pc_primary, transform=None)
         else:
             # Primary → active; secondary → reference overlay (with alignment transform)
             self._pc = self._pc_primary
+            self._viewport.update_active_transform(np.eye(4, dtype=np.float32))
             self._viewport.reload_point_cloud(self._pc_primary)
             self._viewport.load_reference(
                 self._pc_secondary, transform=self._secondary_alignment_T
@@ -907,6 +969,7 @@ class MainWindow(QMainWindow):
         if self._editing_secondary and self._pc_primary is not None:
             self._editing_secondary = False
             self._pc = self._pc_primary
+            self._viewport.update_active_transform(np.eye(4, dtype=np.float32))
             self._viewport.reload_point_cloud(self._pc_primary)
             self._undo_stack._undo.clear()
             self._undo_stack._redo.clear()
@@ -930,9 +993,10 @@ class MainWindow(QMainWindow):
         center = alive_pos.mean(axis=0)
         manual_delta = euler_to_transform(tx, ty, tz, yaw, pitch, roll, center=center)
         total = (self._secondary_alignment_T @ manual_delta).astype(np.float32)
-        # Only affects the reference overlay (secondary is the reference when
-        # editing primary, or when the transform controls are being used)
-        self._viewport.update_reference_transform(total)
+        if self._editing_secondary:
+            self._viewport.update_active_transform(total)
+        else:
+            self._viewport.update_reference_transform(total)
 
     def _run_icp(self) -> None:
         """Run rigid ICP to align secondary cloud to primary."""
@@ -945,10 +1009,11 @@ class MainWindow(QMainWindow):
         max_iter = self._merge_panel.get_icp_max_iter()
 
         try:
-            T, rmse, n_inliers = icp_align(
+            T, rmse, n_inliers = webmerge_align(
                 source=secondary_pos,
                 target=primary_pos,
                 init_transform=self._secondary_alignment_T,
+                voxel_size=5.0,
                 max_iter=max_iter,
             )
         except Exception as exc:
@@ -965,6 +1030,204 @@ class MainWindow(QMainWindow):
             self._switch_active_cloud()   # → primary active, secondary as aligned overlay
         else:
             self._viewport.update_reference_transform(T)
+
+    def _run_webmerge(self) -> None:
+        if self._pc_primary is None or self._pc_secondary is None:
+            return
+
+        params = self._merge_panel.get_webmerge_params()
+        self._merge_panel.set_webmerge_status("Starting WebMerge Pipeline...")
+        self._merge_panel._set_secondary_controls_enabled(False) 
+        
+        self._wm_thread = QThread()
+        self._wm_worker = _WebMergeWorker(self._pc_primary, self._pc_secondary, params)
+        self._wm_worker.moveToThread(self._wm_thread)
+
+        self._wm_thread.started.connect(self._wm_worker.run)
+        self._wm_worker.progress.connect(self._merge_panel.set_webmerge_status)
+        self._wm_worker.finished.connect(self._on_webmerge_finished)
+        self._wm_worker.error.connect(self._on_webmerge_error)
+        
+        self._wm_worker.finished.connect(self._wm_thread.quit)
+        self._wm_worker.error.connect(self._wm_thread.quit)
+        self._wm_thread.finished.connect(lambda: self._merge_panel._set_secondary_controls_enabled(True))
+
+        self._wm_thread.start()
+
+    def _on_webmerge_finished(self, T: np.ndarray, rmse: float, n_inliers: int) -> None:
+        self._secondary_alignment_T = T
+        self._merge_panel.reset_transform_spinboxes()
+        self._merge_panel.set_icp_result(rmse, n_inliers)
+        self._merge_panel.set_webmerge_status("WebMerge Pipeline completed!")
+
+        if self._editing_secondary:
+            self._switch_active_cloud()
+        else:
+            self._viewport.update_reference_transform(T)
+
+    def _on_webmerge_error(self, msg: str) -> None:
+        QMessageBox.critical(self, "WebMerge Error", f"Pipeline failed:\n{msg}")
+        self._merge_panel.set_webmerge_status("Pipeline failed.")
+
+    def _on_anchor_mode_toggled(self, checked: bool) -> None:
+        if checked:
+            if self._pc_primary is None or self._pc_secondary is None:
+                self._merge_panel._btn_anchor_mode.setChecked(False)
+                return
+            
+            from app.data.webmerge import farthest_point_sampling
+            from scipy.spatial import cKDTree
+            
+            p_pos = self._pc_primary.positions[self._pc_primary.alive_mask]
+            s_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
+            
+            # 1. Get 100 anchors on Primary (Red dots)
+            p_idx = farthest_point_sampling(p_pos, 100) if len(p_pos) > 100 else np.arange(len(p_pos))
+            p_anchors = p_pos[p_idx]
+            
+            # 2. Get ~100 corresponding anchors on Secondary (Blue dots)
+            # Map primary anchors into secondary's local space
+            T_inv = np.linalg.inv(self._secondary_alignment_T.astype(np.float64))
+            p_h = np.concatenate([p_anchors.astype(np.float64), np.ones((len(p_anchors), 1))], axis=1)
+            p_in_s = (T_inv @ p_h.T).T[:, :3].astype(np.float32)
+            
+            # Find nearest actual secondary point for each primary feature
+            tree = cKDTree(s_pos)
+            _, nearest_s_idx = tree.query(p_in_s)
+            s_anchors = s_pos[nearest_s_idx]
+            
+            # Also add 30 independent FPS points to Secondary just in case 
+            # there are unique V-features only present in the secondary web
+            s_fps_idx = farthest_point_sampling(s_pos, 30) if len(s_pos) > 30 else np.arange(len(s_pos))
+            s_anchors = np.vstack((s_anchors, s_pos[s_fps_idx]))
+            
+            # Filter to unique secondary anchors
+            s_anchors = np.unique(s_anchors, axis=0)
+            
+            self._viewport.tool_manager.set_tool('manual_align')
+            self._viewport.tool_manager.active_tool.set_anchors(p_anchors, s_anchors)
+            self._merge_panel.set_anchor_status(0)
+        else:
+            if self._viewport.tool_manager.active_name == 'manual_align':
+                self._viewport.tool_manager.set_tool('lasso')
+
+    def on_manual_anchors_paired(self, pairs_count: int) -> None:
+        self._merge_panel.set_anchor_status(pairs_count)
+
+    def _apply_secondary_cloud(self, pc) -> None:
+        self._pc_secondary = pc
+        self._secondary_alignment_T = np.eye(4, dtype=np.float32)
+        self._merge_panel.reset_transform_spinboxes()
+        if self._editing_secondary:
+            self._pc = pc
+            self._viewport.reload_point_cloud(pc)
+        else:
+            self._viewport.load_reference(pc, transform=None)
+
+    def _apply_manual_warp(self) -> None:
+        if self._pc_secondary is None or self._pc_primary is None:
+            return
+            
+        tool = self._viewport.tool_manager.active_tool
+        if not hasattr(tool, 'pairs') or len(tool.pairs) == 0:
+            return
+            
+        from app.data.tps import tps_warp
+        
+        # Build source and target anchors
+        s_anchors = []
+        p_anchors = []
+        for p_idx, s_idx in tool.pairs:
+            p_anchors.append(tool.primary_anchors[p_idx])
+            # Apply current secondary alignment to the source anchors so they match visual position
+            T = self._secondary_alignment_T.astype(np.float64)
+            s_pt = tool.secondary_anchors[s_idx].astype(np.float64)
+            s_pt_h = np.append(s_pt, 1.0)
+            s_anchors.append((T @ s_pt_h)[:3])
+            
+        s_anchors = np.array(s_anchors, dtype=np.float32)
+        p_anchors = np.array(p_anchors, dtype=np.float32)
+        
+        # Warp the secondary cloud
+        # First apply current rigid transform, then warp
+        sec_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
+        T = self._secondary_alignment_T.astype(np.float64)
+        sec_h = np.concatenate([sec_pos.astype(np.float64), np.ones((len(sec_pos), 1))], axis=1)
+        aligned_pos = (T @ sec_h.T).T[:, :3].astype(np.float32)
+        
+        warped_pos = tps_warp(aligned_pos, s_anchors, p_anchors)
+        
+        new_pc = PointCloud(warped_pos, self._pc_secondary.colors[self._pc_secondary.alive_mask])
+        
+        cmd = ReplaceCloudCommand(self._pc_secondary, new_pc, self._apply_secondary_cloud, "Manual Anchor Warp")
+        self._undo_stack.push(cmd)
+        
+        # Exit mode
+        self._merge_panel._btn_anchor_mode.setChecked(False)
+
+    def _auto_match_regions(self) -> None:
+        if self._pc_primary is None or self._pc_secondary is None:
+            return
+            
+        p_sel = self._pc_primary.selection_mask
+        s_sel = self._pc_secondary.selection_mask
+        
+        if not np.any(p_sel) or not np.any(s_sel):
+            QMessageBox.warning(self, "Missing Selection", 
+                                "Please select a region on the Primary web and a region on the Secondary web first.")
+            return
+            
+        # Get selected points
+        p_pts = self._pc_primary.positions[p_sel]
+        s_pts = self._pc_secondary.positions[s_sel]
+        
+        # Transform secondary points to primary space for FPFH matching?
+        # FPFH is rotation invariant, but it's better if they are roughly aligned.
+        # Wait, fpfh_match_regions expects them to be in the same coordinate frame or it doesn't matter.
+        # Actually FPFH relies on local geometry, which is translation/rotation invariant.
+        
+        self._status.showMessage("Computing FPFH features to find best match...")
+        QApplication.processEvents()
+        
+        from app.data.align import fpfh_match_regions
+        try:
+            p_idx, s_idx = fpfh_match_regions(p_pts, s_pts)
+        except Exception as e:
+            QMessageBox.critical(self, "Match Failed", f"Failed to compute features: {e}")
+            self._status.clearMessage()
+            return
+            
+        best_p = p_pts[p_idx]
+        best_s = s_pts[s_idx]
+        
+        # Ensure UI is in Anchor Mode so the user can inspect the new anchors
+        was_checked = self._merge_panel._btn_anchor_mode.isChecked()
+        if not was_checked:
+            self._merge_panel._btn_anchor_mode.setChecked(True) # This generates the base anchors
+            
+        tool = self._viewport.tool_manager._tools.get('manual_align')
+        if tool is None:
+            return
+            
+        # Ensure the tool's anchors are initialized (fallback if something broke)
+        if tool.primary_anchors is None:
+            tool.primary_anchors = np.empty((0, 3), dtype=np.float32)
+        if tool.secondary_anchors is None:
+            tool.secondary_anchors = np.empty((0, 3), dtype=np.float32)
+            
+        # Add to tool anchors (but DO NOT pair them, let the user decide)
+        tool.primary_anchors = np.vstack((tool.primary_anchors, best_p))
+        tool.secondary_anchors = np.vstack((tool.secondary_anchors, best_s))
+        
+        # Switch the active tool back to manual_align so they are visible
+        self._viewport.tool_manager.set_tool('manual_align')
+        
+        # Clear selections so user can do it again
+        self._pc_primary.deselect_all()
+        self._pc_secondary.deselect_all()
+        self._viewport.on_selection_changed()
+        
+        self._status.showMessage("Features matched! Click them to pair if they look good.")
 
     def _run_cpd(self) -> None:
         """Run non-rigid CPD to warp the secondary cloud to the primary."""

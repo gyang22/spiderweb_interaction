@@ -4,6 +4,7 @@ from app.tools.base_tool import AbstractTool
 from app.tools.click_select import ClickSelectTool
 from app.tools.box_select import BoxSelectTool
 from app.tools.lasso_select import LassoSelectTool
+from app.tools.manual_align import ManualAlignTool
 
 
 class NullTool(AbstractTool):
@@ -24,6 +25,7 @@ class ToolManager:
             self.CLICK: ClickSelectTool(),
             self.BOX:   BoxSelectTool(),
             self.LASSO: LassoSelectTool(),
+            'manual_align': ManualAlignTool(),
             'null':     NullTool(),
         }
         self._active_name = 'null'
