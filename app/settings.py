@@ -12,6 +12,7 @@ def default_dir() -> str:
 
 SELECTION_COLOR = (1.0, 0.5, 0.0, 1.0)   # orange highlight for selected points
 DEFAULT_POINT_COLOR = (0.85, 0.85, 0.85, 1.0)  # uniform bright gray for points
+SECONDARY_POINT_COLOR = (0.45, 0.75, 1.0, 1.0)  # bluish tint to distinguish the secondary cloud
 DEFAULT_POINT_SIZE = 4.0
 MIN_POINT_SIZE = 1
 MAX_POINT_SIZE = 20

@@ -929,6 +929,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load error", f"Failed to load secondary PCD:\n{exc}")
             return
 
+        # Tint the secondary cloud so it's visually distinct from the grey primary.
+        pc.colors[:] = settings.SECONDARY_POINT_COLOR
+
         self._pc_secondary = pc
         self._secondary_alignment_T = np.eye(4, dtype=np.float32)
 
