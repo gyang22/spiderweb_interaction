@@ -17,6 +17,7 @@ class SkeletonEditorPanel(QDockWidget):
     select_by_degree_clicked = pyqtSignal(int)
     reextract_clicked      = pyqtSignal()
     delete_nodes_clicked   = pyqtSignal()
+    smooth_clicked         = pyqtSignal(float)
 
     def __init__(self, parent=None) -> None:
         super().__init__("Skeleton Node Editor", parent)
@@ -129,6 +130,33 @@ class SkeletonEditorPanel(QDockWidget):
         self._btn_delete.clicked.connect(self.delete_nodes_clicked)
         layout.addWidget(self._btn_delete)
 
+        # ── Smooth ────────────────────────────────────────────────────────────
+        smooth_group = QGroupBox("Smooth")
+        smooth_layout = QHBoxLayout(smooth_group)
+        smooth_layout.setSpacing(6)
+
+        smooth_layout.addWidget(QLabel("Max Dev:"))
+        self._spin_dev = QDoubleSpinBox()
+        self._spin_dev.setRange(0.0, 10000.0)
+        self._spin_dev.setDecimals(2)
+        self._spin_dev.setSingleStep(1.0)
+        self._spin_dev.setValue(5.0)
+        self._spin_dev.setToolTip(
+            "Maximum allowed distance a selected node can deviate from the straight line\n"
+            "between its neighbors to be smoothed out."
+        )
+        smooth_layout.addWidget(self._spin_dev)
+
+        self._btn_smooth = QPushButton("Smooth Selected")
+        self._btn_smooth.setFixedHeight(28)
+        self._btn_smooth.setToolTip("Smooth out selected chains of nodes if they form straight lines.")
+        self._btn_smooth.clicked.connect(
+            lambda: self.smooth_clicked.emit(self._spin_dev.value())
+        )
+        smooth_layout.addWidget(self._btn_smooth)
+
+        layout.addWidget(smooth_group)
+
         # ── Degree distribution ───────────────────────────────────────────────
         stats_group = QGroupBox("Degree distribution")
         stats_layout = QVBoxLayout(stats_group)
@@ -184,5 +212,5 @@ class SkeletonEditorPanel(QDockWidget):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for w in (self._btn_sel_all, self._btn_desel, self._btn_sel_degree,
-                  self._btn_reextract, self._btn_delete):
+                  self._btn_reextract, self._btn_delete, self._btn_smooth):
             w.setEnabled(enabled)

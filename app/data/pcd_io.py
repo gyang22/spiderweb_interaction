@@ -204,10 +204,10 @@ def load_pcd(path: str | Path) -> PointCloud:
     valid = np.isfinite(positions).all(axis=1)
     positions = positions[valid]
 
-    # Extract colors
-    colors = _extract_colors(data[valid], fields)
-
-    return PointCloud(positions, colors)
+    # Spiderweb PCDs only carry dim grey intensity, which is hard to see on a
+    # dark background. Ignore the file's per-point colors and let PointCloud
+    # apply the uniform bright grey from settings.DEFAULT_POINT_COLOR.
+    return PointCloud(positions)
 
 
 def save_pcd(pc: PointCloud, path: str | Path) -> None:

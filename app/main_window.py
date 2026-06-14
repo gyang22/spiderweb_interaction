@@ -33,6 +33,7 @@ from app.data.strand_graph import (
     clean as clean_graph, degree_counts,
     _build_knn_edges, _kruskal_mst,
 )
+from app.data.smooth import smooth_graph
 from app.data.graph_io import export_graph_json, import_graph_json
 from app.data.downsample import voxel_downsample
 from app.data.align import icp_align, cpd_align, euler_to_transform, webmerge_align
@@ -363,6 +364,7 @@ class MainWindow(QMainWindow):
         self._skel_editor.select_by_degree_clicked.connect(self._skel_select_by_degree)
         self._skel_editor.reextract_clicked.connect(self._reextract_selected_skel_nodes)
         self._skel_editor.delete_nodes_clicked.connect(self._delete_selected_skel_nodes)
+        self._skel_editor.smooth_clicked.connect(self._smooth_selected_skel_nodes)
         self._viewport.skel_selection_changed.connect(self._on_skel_selection_changed)
 
         self._build_menu()
@@ -506,6 +508,9 @@ class MainWindow(QMainWindow):
         self._viewport.clear_reference()
         self._merge_panel.clear_secondary_status()
         self._viewport.setFocus()   # give viewport focus so WASD works immediately
+        
+        # Focus on Graph Extraction panel by default when loading PCD
+        self._graph_panel.raise_()
 
     def _on_load_error(self, msg: str) -> None:
         QMessageBox.critical(self, "Load error", f"Failed to load PCD:\n{msg}")
@@ -734,6 +739,10 @@ class MainWindow(QMainWindow):
             if self._skeleton is not None:
                 graph = merge_graphs(self._skeleton, graph)
             self._set_skeleton(graph)
+            
+            # Switch to skeleton editor when importing a skeleton
+            self._skel_editor.raise_()
+            self._skel_editor._chk_edit.setChecked(True)
         except Exception as exc:
             QMessageBox.critical(self, "Import error", str(exc))
             import traceback
@@ -805,6 +814,18 @@ class MainWindow(QMainWindow):
         self._viewport._skel_selection[:] = counts == degree
         self._viewport._upload_skel_selection()
         self._viewport.skel_selection_changed.emit()
+
+    def _smooth_selected_skel_nodes(self, max_deviation: float) -> None:
+        if self._skeleton is None or self._viewport._skel_selection is None:
+            return
+            
+        old_skel = self._skeleton
+        new_skel = smooth_graph(old_skel, self._viewport._skel_selection, max_deviation)
+        
+        cmd = EditSkeletonCommand(
+            old_skel, new_skel, self._set_skeleton, "smooth selected nodes"
+        )
+        self._undo_stack.push(cmd)
 
     def _skel_select_all(self) -> None:
         if self._viewport._skel_selection is None:

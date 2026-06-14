@@ -11,7 +11,7 @@ def default_dir() -> str:
     return str(SAVES_DIR if SAVES_DIR.exists() else Path.home())
 
 SELECTION_COLOR = (1.0, 0.5, 0.0, 1.0)   # orange highlight for selected points
-DEFAULT_POINT_COLOR = (0.7, 0.7, 0.7, 1.0)  # neutral gray when no RGB in file
+DEFAULT_POINT_COLOR = (0.85, 0.85, 0.85, 1.0)  # uniform bright gray for points
 DEFAULT_POINT_SIZE = 4.0
 MIN_POINT_SIZE = 1
 MAX_POINT_SIZE = 20
