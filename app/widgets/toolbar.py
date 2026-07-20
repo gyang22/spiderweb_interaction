@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 from app.widgets.color_picker import ColorPickerButton
 from app import settings
+from app.user_config import config
 
 
 class ToolBar(QToolBar):
@@ -75,7 +76,7 @@ class ToolBar(QToolBar):
 
         self._spinbox = QSpinBox()
         self._spinbox.setRange(settings.MIN_POINT_SIZE, settings.MAX_POINT_SIZE)
-        self._spinbox.setValue(int(settings.DEFAULT_POINT_SIZE))
+        self._spinbox.setValue(int(config.get("point_size")))
         self._spinbox.valueChanged.connect(self.point_size_changed)
 
         self._btn_ps_plus = QPushButton("+")
@@ -91,7 +92,7 @@ class ToolBar(QToolBar):
         # Slider below
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(settings.MIN_POINT_SIZE, settings.MAX_POINT_SIZE)
-        self._slider.setValue(int(settings.DEFAULT_POINT_SIZE))
+        self._slider.setValue(int(config.get("point_size")))
         self._slider.setContentsMargins(6, 0, 6, 0)
         self._slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._slider.valueChanged.connect(self._spinbox.setValue)
@@ -163,6 +164,10 @@ class ToolBar(QToolBar):
         mapping = {'click': self._btn_click, 'box': self._btn_box, 'lasso': self._btn_lasso}
         mapping[name].setChecked(True)
         self.tool_selected.emit(name)
+
+    def set_point_size(self, size: int) -> None:
+        """Programmatically set the point-size control (emits point_size_changed)."""
+        self._spinbox.setValue(int(size))
 
     def _increase_point_size(self) -> None:
         self._spinbox.setValue(min(self._spinbox.value() + 1, settings.MAX_POINT_SIZE))

@@ -38,6 +38,8 @@ from app.data.graph_io import export_graph_json, import_graph_json
 from app.data.downsample import voxel_downsample
 from app.data.align import icp_align, cpd_align, euler_to_transform, webmerge_align
 from app.data.point_cloud import PointCloud
+from app.user_config import config
+from app.widgets.settings_dialog import SettingsDialog
 from app.commands.replace_cloud_command import ReplaceCloudCommand
 from app.commands.edit_skeleton_command import EditSkeletonCommand
 from app.widgets.pcd_selector import PcdSelectorDialog
@@ -375,6 +377,11 @@ class MainWindow(QMainWindow):
         # widget has focus (toolbar clicks steal focus from the viewport)
         QApplication.instance().installEventFilter(self)
 
+        # Apply user-configurable settings and keep them live.
+        self._refresh_hotkeys()
+        config.changed.connect(self._apply_config)
+        self._apply_config()
+
     # ── menu bar ──────────────────────────────────────────────────────────────
 
     def _build_menu(self) -> None:
@@ -432,15 +439,48 @@ class MainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
-        act_invert = QAction("&Invert Selection", self)
-        act_invert.setShortcut(QKeySequence("Ctrl+I"))
-        act_invert.triggered.connect(self._invert_selection)
-        edit_menu.addAction(act_invert)
+        self._act_invert = QAction("&Invert Selection", self)
+        self._act_invert.setShortcut(config.hotkey_sequence("hk_invert_selection"))
+        self._act_invert.triggered.connect(self._invert_selection)
+        edit_menu.addAction(self._act_invert)
 
-        act_clear = QAction("&Clear Selection", self)
-        act_clear.setShortcut(QKeySequence("Escape"))
-        act_clear.triggered.connect(self._clear_selection)
-        edit_menu.addAction(act_clear)
+        self._act_clear = QAction("&Clear Selection", self)
+        self._act_clear.setShortcut(config.hotkey_sequence("hk_clear_selection"))
+        self._act_clear.triggered.connect(self._clear_selection)
+        edit_menu.addAction(self._act_clear)
+
+        edit_menu.addSeparator()
+
+        act_prefs = QAction("&Preferences…", self)
+        act_prefs.setShortcut(QKeySequence("Ctrl+,"))
+        act_prefs.triggered.connect(self._open_preferences)
+        edit_menu.addAction(act_prefs)
+
+    # ── settings / preferences ─────────────────────────────────────────────────
+
+    def _open_preferences(self) -> None:
+        SettingsDialog(self).exec()
+
+    def _refresh_hotkeys(self) -> None:
+        """Cache the configurable single-key hotkeys for the event filter."""
+        self._hk_fps     = config.hotkey_key("hk_fps_toggle")
+        self._hk_delete  = config.hotkey_key("hk_delete_selected")
+        self._hk_extract = config.hotkey_key("hk_extract_skeleton")
+        self._hk_reset   = config.hotkey_key("hk_reset_camera")
+
+    def _apply_config(self) -> None:
+        """Apply user-configurable settings live (called on startup and on save)."""
+        # Point size
+        self._toolbar.set_point_size(int(config.get("point_size")))
+        # Camera settings
+        self._viewport.apply_camera_config()
+        # Undo depth
+        self._undo_stack.set_max_depth(int(config.get("undo_max_depth")))
+        # Chord hotkeys → QActions
+        self._act_invert.setShortcut(config.hotkey_sequence("hk_invert_selection"))
+        self._act_clear.setShortcut(config.hotkey_sequence("hk_clear_selection"))
+        # Single-key hotkeys → event filter cache
+        self._refresh_hotkeys()
 
     # ── File actions ──────────────────────────────────────────────────────────
 
@@ -463,7 +503,7 @@ class MainWindow(QMainWindow):
     def _open_file_dialog(self) -> None:
         """Fallback: open any PCD via a standard file dialog."""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open PCD file", "", "Point Cloud (*.pcd);;All files (*)"
+            self, "Open PCD file", config.default_dir(), "Point Cloud (*.pcd);;All files (*)"
         )
         if path:
             self._load_path(path)
@@ -521,7 +561,7 @@ class MainWindow(QMainWindow):
         if self._pc is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save PCD file", settings.default_dir(), "Point Cloud (*.pcd)"
+            self, "Save PCD file", config.default_dir(), "Point Cloud (*.pcd)"
         )
         if not path:
             return
@@ -534,7 +574,7 @@ class MainWindow(QMainWindow):
         if self._pc is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export PLY", settings.default_dir(), "PLY file (*.ply)"
+            self, "Export PLY", config.default_dir(), "PLY file (*.ply)"
         )
         if not path:
             return
@@ -715,7 +755,7 @@ class MainWindow(QMainWindow):
                                     "Extract a skeleton first before exporting.")
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Skeleton JSON", settings.default_dir(), "JSON file (*.json)"
+            self, "Export Skeleton JSON", config.default_dir(), "JSON file (*.json)"
         )
         if not path:
             return
@@ -726,7 +766,7 @@ class MainWindow(QMainWindow):
 
     def _import_graph(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import Skeleton JSON", settings.default_dir(), "JSON file (*.json);;All files (*)"
+            self, "Import Skeleton JSON", config.default_dir(), "JSON file (*.json);;All files (*)"
         )
         if not path:
             return
@@ -985,6 +1025,11 @@ class MainWindow(QMainWindow):
         self._update_undo_actions()
         self._status.update_point_cloud(self._pc)
         self._merge_panel.set_editing_state(self._editing_secondary)
+        # Keep the manual-align tool's projection frame in sync with the swap so
+        # anchor picking/pairing still lines up on whichever cloud is active.
+        tool = self._viewport.tool_manager._tools.get('manual_align')
+        if tool is not None:
+            tool.set_editing_secondary(self._editing_secondary)
         self._viewport.setFocus()
 
     def _clear_secondary(self) -> None:
@@ -1104,16 +1149,13 @@ class MainWindow(QMainWindow):
             self._viewport.tool_manager.set_tool('manual_align')
             tool = self._viewport.tool_manager.active_tool
 
-            # Only auto-generate candidate anchors on a fresh start. If anchors
-            # already exist (e.g. manually picked ones), keep them so the user's
-            # work persists — regenerating would silently wipe it.
-            has_anchors = ((tool.primary_anchors is not None and len(tool.primary_anchors) > 0) or
-                           (tool.secondary_anchors is not None and len(tool.secondary_anchors) > 0))
-            if not has_anchors:
-                p_anchors, s_anchors = self._generate_candidate_anchors()
-                tool.set_anchors(p_anchors, s_anchors)
-
+            # Show both: keep any manually-picked anchors and merge in the auto
+            # FPS candidates (deduplicated, existing indices preserved so pairs
+            # stay valid). Manual picks are never lost.
             tool.ensure_anchor_arrays()
+            p_anchors, s_anchors = self._generate_candidate_anchors()
+            tool.merge_anchors(p_anchors, s_anchors)
+
             self._feed_clouds_to_tool()
             tool.set_mode('pair')
             self._merge_panel.set_anchor_status(len(tool.pairs))
@@ -1132,8 +1174,9 @@ class MainWindow(QMainWindow):
         p_pos = self._pc_primary.positions[self._pc_primary.alive_mask]
         s_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
 
-        # 1. Get 100 anchors on Primary (Red dots)
-        p_idx = farthest_point_sampling(p_pos, 100) if len(p_pos) > 100 else np.arange(len(p_pos))
+        # 1. Get N anchors on Primary (Red dots)
+        n_primary = int(config.get("anchor_primary_count"))
+        p_idx = farthest_point_sampling(p_pos, n_primary) if len(p_pos) > n_primary else np.arange(len(p_pos))
         p_anchors = p_pos[p_idx]
 
         # 2. Get ~100 corresponding anchors on Secondary (Blue dots)
@@ -1147,10 +1190,13 @@ class MainWindow(QMainWindow):
         _, nearest_s_idx = tree.query(p_in_s)
         s_anchors = s_pos[nearest_s_idx]
 
-        # Also add 30 independent FPS points to Secondary just in case
+        # Also add some independent FPS points to Secondary just in case
         # there are unique V-features only present in the secondary web
-        s_fps_idx = farthest_point_sampling(s_pos, 30) if len(s_pos) > 30 else np.arange(len(s_pos))
-        s_anchors = np.vstack((s_anchors, s_pos[s_fps_idx]))
+        n_extra = int(config.get("anchor_secondary_extra"))
+        if n_extra > 0:
+            s_fps_idx = (farthest_point_sampling(s_pos, n_extra)
+                         if len(s_pos) > n_extra else np.arange(len(s_pos)))
+            s_anchors = np.vstack((s_anchors, s_pos[s_fps_idx]))
 
         # Filter to unique secondary anchors
         s_anchors = np.unique(s_anchors, axis=0)
@@ -1175,6 +1221,16 @@ class MainWindow(QMainWindow):
         s_pos = (self._pc_secondary.positions[self._pc_secondary.alive_mask]
                  if self._pc_secondary is not None else None)
         tool.set_clouds(p_pos, s_pos)
+        tool.set_editing_secondary(self._editing_secondary)
+
+    def cycle_pick_target(self) -> None:
+        """Hotkey handler (E): advance the pick target web and sync the panel combo."""
+        tool = self._viewport.tool_manager._tools.get('manual_align')
+        if tool is None:
+            return
+        new_target = tool.cycle_pick_target()
+        self._merge_panel.set_pick_target(new_target)
+        self._viewport.update()
 
     def _on_pick_mode_toggled(self, checked: bool) -> None:
         if checked:
@@ -1544,22 +1600,23 @@ class MainWindow(QMainWindow):
         key = int(event.key())   # normalise Qt.Key enum → plain int
 
         if ev_type == QEvent.Type.KeyPress and not event.isAutoRepeat():
-            if key == int(Qt.Key.Key_Tab):
+            if self._hk_fps is not None and key == self._hk_fps:
                 self._viewport.toggle_fps_mode()
                 return True          # consume — prevent Qt focus-tab navigation
-            if key in (int(Qt.Key.Key_Delete), int(Qt.Key.Key_Q)):
+            # Delete key always deletes; the configured key is an extra binding.
+            if key == int(Qt.Key.Key_Delete) or (self._hk_delete is not None and key == self._hk_delete):
                 if self._viewport.skeleton_edit_mode:
                     self._delete_selected_skel_nodes()
                 else:
                     self._delete_selected()
                 return True
-            if key == int(Qt.Key.Key_G):
+            if self._hk_extract is not None and key == self._hk_extract:
                 if self._viewport.skeleton_edit_mode:
                     self._reextract_selected_skel_nodes()
                 else:
                     self._extract_skeleton()
                 return True
-            if key == int(Qt.Key.Key_Home):
+            if self._hk_reset is not None and key == self._hk_reset:
                 self._viewport.reset_camera()
                 return True
             if key in self._CAM_KEYS:

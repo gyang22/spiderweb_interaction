@@ -27,11 +27,24 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
+from app.user_config import config
+
 
 _DEFAULT_ROOT = Path(
     "/Users/grantyang/Documents/python_projects/spiderweb/"
     "video_processing/point_clouds"
 )
+
+
+def _pick_root() -> Path:
+    """Starting folder for the browser: the user-configured default folder if
+    set, else the built-in point-cloud folder, else the saves/home fallback."""
+    d = str(config.get("default_dir") or "").strip()
+    if d and Path(d).is_dir():
+        return Path(d)
+    if _DEFAULT_ROOT.is_dir():
+        return _DEFAULT_ROOT
+    return Path(config.default_dir())
 
 # Matches: "<series> <rest> T<threshold>.pcd"
 _NAME_RE = re.compile(
@@ -104,7 +117,7 @@ class PcdSelectorDialog(QDialog):
         self.selected_path: Path | None = None
         self.import_json_requested: bool = False
 
-        self._root = _DEFAULT_ROOT
+        self._root = _pick_root()
         self._data, self._structured = _scan(self._root)
         self._build_ui()
         self._populate_tree()

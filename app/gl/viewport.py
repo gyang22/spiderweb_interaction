@@ -34,6 +34,7 @@ from app.gl.picking import PickingRenderer
 from app.gl.skeleton_renderer import SkeletonRenderer
 from app.tools.tool_manager import ToolManager
 from app import settings
+from app.user_config import config
 
 
 class GLViewport(QOpenGLWidget):
@@ -71,6 +72,7 @@ class GLViewport(QOpenGLWidget):
         self._home_pitch        = 0.0
         self._home_speed        = settings.CAMERA_MOVE_SPEED
         self._home_acceleration = settings.CAMERA_ACCELERATION
+        self._base_move_speed   = settings.CAMERA_MOVE_SPEED
 
         self._last_time   = time.perf_counter()
         self._fps         = 0.0
@@ -111,7 +113,8 @@ class GLViewport(QOpenGLWidget):
                                                      dtype=np.float32))
         self.camera.yaw        = 0.0    # forward = (0,0,-1) → looking toward origin
         self.camera.pitch      = 0.0
-        self.camera.move_speed = extent * 0.5   # sensible speed for this scale
+        self._base_move_speed  = extent * 0.5   # auto-fit base speed for this scale
+        self.camera.move_speed = self._base_move_speed * float(config.get("camera_speed_mult"))
         # Steady-state velocity = acceleration / damping, so set acceleration
         # to move_speed * damping so the camera actually reaches move_speed.
         # Without this, the default acceleration=40 gives v_ss=3.3 regardless
@@ -163,6 +166,15 @@ class GLViewport(QOpenGLWidget):
         if self.renderer:
             self.renderer.point_size = float(size)
 
+    def apply_camera_config(self) -> None:
+        """Re-apply user-configurable camera settings (live, from user config)."""
+        self.camera.mouse_sensitivity = float(config.get("camera_mouse_sensitivity"))
+        settings.CAMERA_FOV = float(config.get("camera_fov"))
+        base = getattr(self, "_base_move_speed", settings.CAMERA_MOVE_SPEED)
+        self.camera.move_speed = base * float(config.get("camera_speed_mult"))
+        self.camera.acceleration = self.camera.move_speed * self.camera.damping
+        self.update()
+
     def set_skeleton(self, graph) -> None:
         """Upload a StrandGraph to the skeleton renderer and repaint."""
         if self.skeleton_renderer is None:
@@ -187,7 +199,8 @@ class GLViewport(QOpenGLWidget):
                                                        dtype=np.float32))
         self.camera.yaw          = 0.0
         self.camera.pitch        = 0.0
-        self.camera.move_speed   = extent * 0.5
+        self._base_move_speed    = extent * 0.5
+        self.camera.move_speed   = self._base_move_speed * float(config.get("camera_speed_mult"))
         self.camera.acceleration = self.camera.move_speed * self.camera.damping
         self.camera.near         = extent * 1e-3
         self.camera.far          = extent * 1000.0
@@ -623,9 +636,11 @@ class GLViewport(QOpenGLWidget):
     def event(self, event) -> bool:
         # Override at event() level — keyPressEvent never sees Tab because Qt
         # intercepts it for focus-tab navigation before reaching keyPressEvent.
-        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Tab:
-            self.toggle_fps_mode()
-            return True
+        if event.type() == QEvent.Type.KeyPress:
+            fps_key = config.hotkey_key("hk_fps_toggle")
+            if fps_key is not None and int(event.key()) == fps_key:
+                self.toggle_fps_mode()
+                return True
         return super().event(event)
 
     # Camera movement keys handled directly here (primary path).
@@ -639,6 +654,16 @@ class GLViewport(QOpenGLWidget):
 
     def keyPressEvent(self, event) -> None:
         key = int(event.key())
+        # Cycle the manual-pick target web (Nearest → Primary → Secondary).
+        cycle_key = config.hotkey_key("hk_cycle_pick_target")
+        if not event.isAutoRepeat() and cycle_key is not None and key == cycle_key:
+            tm = self.tool_manager
+            if tm.active_name == 'manual_align' and getattr(tm.active_tool, 'mode', None) == 'pick':
+                win = self.window()
+                if hasattr(win, 'cycle_pick_target'):
+                    win.cycle_pick_target()
+                    event.accept()
+                    return
         if not event.isAutoRepeat() and key in self._CAM_KEYS:
             self.camera.key_down(key)
             event.accept()

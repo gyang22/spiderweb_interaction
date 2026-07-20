@@ -19,6 +19,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from app.user_config import config
+
 
 class MergePanel(QDockWidget):
     # ── signals ───────────────────────────────────────────────────────────────
@@ -139,7 +141,7 @@ class MergePanel(QDockWidget):
         iter_row.addWidget(QLabel("Max iter:"))
         self._spin_icp_iter = QSpinBox()
         self._spin_icp_iter.setRange(1, 500)
-        self._spin_icp_iter.setValue(50)
+        self._spin_icp_iter.setValue(int(config.get("icp_max_iter")))
         self._spin_icp_iter.setEnabled(False)
         iter_row.addWidget(self._spin_icp_iter)
         icp_layout.addLayout(iter_row)
@@ -168,7 +170,7 @@ class MergePanel(QDockWidget):
         
         self._spin_wm_radius = QDoubleSpinBox()
         self._spin_wm_radius.setRange(0.1, 1000.0)
-        self._spin_wm_radius.setValue(20.0)
+        self._spin_wm_radius.setValue(float(config.get("wm_search_radius")))
         self._spin_wm_radius.setSingleStep(1.0)
         self._spin_wm_radius.setDecimals(1)
         r_layout = QHBoxLayout()
@@ -178,7 +180,7 @@ class MergePanel(QDockWidget):
         
         self._spin_wm_vote = QSpinBox()
         self._spin_wm_vote.setRange(1, 50)
-        self._spin_wm_vote.setValue(5)
+        self._spin_wm_vote.setValue(int(config.get("wm_vote_steps")))
         v_layout = QHBoxLayout()
         v_layout.addWidget(QLabel("Vote Steps:"))
         v_layout.addWidget(self._spin_wm_vote)
@@ -186,7 +188,7 @@ class MergePanel(QDockWidget):
         
         self._spin_wm_step = QDoubleSpinBox()
         self._spin_wm_step.setRange(0.1, 100.0)
-        self._spin_wm_step.setValue(2.5)
+        self._spin_wm_step.setValue(float(config.get("wm_step_size")))
         self._spin_wm_step.setSingleStep(0.5)
         self._spin_wm_step.setDecimals(1)
         s_layout = QHBoxLayout()
@@ -196,7 +198,7 @@ class MergePanel(QDockWidget):
         
         self._spin_wm_lam = QDoubleSpinBox()
         self._spin_wm_lam.setRange(0.01, 1.0)
-        self._spin_wm_lam.setValue(0.4)
+        self._spin_wm_lam.setValue(float(config.get("wm_lam")))
         self._spin_wm_lam.setSingleStep(0.1)
         l_layout = QHBoxLayout()
         l_layout.addWidget(QLabel("Lap. Lam:"))
@@ -205,7 +207,7 @@ class MergePanel(QDockWidget):
         
         self._spin_wm_iter = QSpinBox()
         self._spin_wm_iter.setRange(1, 200)
-        self._spin_wm_iter.setValue(30)
+        self._spin_wm_iter.setValue(int(config.get("wm_iterations")))
         i_layout = QHBoxLayout()
         i_layout.addWidget(QLabel("Lap. Iter:"))
         i_layout.addWidget(self._spin_wm_iter)
@@ -304,7 +306,7 @@ class MergePanel(QDockWidget):
         self._spin_cpd_alpha.setRange(0.001, 10.0)
         self._spin_cpd_alpha.setSingleStep(0.01)
         self._spin_cpd_alpha.setDecimals(3)
-        self._spin_cpd_alpha.setValue(0.1)
+        self._spin_cpd_alpha.setValue(float(config.get("cpd_alpha")))
         self._spin_cpd_alpha.setEnabled(False)
         self._spin_cpd_alpha.setToolTip(
             "CPD regularisation weight.\n"
@@ -422,6 +424,14 @@ class MergePanel(QDockWidget):
 
     def get_pick_target(self) -> str:
         return self._cmb_pick_target.currentData()
+
+    def set_pick_target(self, value: str) -> None:
+        """Set the target combo without emitting pick_target_changed."""
+        idx = self._cmb_pick_target.findData(value)
+        if idx >= 0 and idx != self._cmb_pick_target.currentIndex():
+            self._cmb_pick_target.blockSignals(True)
+            self._cmb_pick_target.setCurrentIndex(idx)
+            self._cmb_pick_target.blockSignals(False)
 
     def set_pick_mode_unchecked(self) -> None:
         """Force the pick button off (e.g. when leaving anchor mode)."""

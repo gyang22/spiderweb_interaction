@@ -51,3 +51,12 @@ class UndoStack(QObject):
     @property
     def redo_description(self) -> str:
         return self._redo[-1].description if self._redo else ""
+
+    def set_max_depth(self, depth: int) -> None:
+        """Change the history cap, preserving the most-recent existing entries."""
+        depth = max(1, int(depth))
+        if self._undo.maxlen == depth:
+            return
+        self._undo = deque(self._undo, maxlen=depth)
+        self._redo = deque(self._redo, maxlen=depth)
+        self.changed.emit()

@@ -37,7 +37,8 @@ class PointCloudRenderer:
         self._pc = None          # reference to active PointCloud
         self._n = 0              # total allocated point count
 
-        self.point_size = settings.DEFAULT_POINT_SIZE
+        from app.user_config import config
+        self.point_size = float(config.get("point_size"))
 
         # Dirty flags — True means the VBO needs to be re-uploaded
         self._colors_dirty = False
