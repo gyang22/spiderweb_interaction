@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial import cKDTree
 from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QPainter, QPen, QColor, QBrush, QFont
 from app.tools.base_tool import AbstractTool
@@ -37,6 +38,9 @@ class ManualAlignTool(AbstractTool):
         self.mode = 'pair'
         # Which web a click targets in pick mode: 'auto' | 'primary' | 'secondary'
         self.pick_target = 'auto'
+        # Which cloud the viewport is currently editing (active renderer). Kept in
+        # sync by the main window so projections use the right model transform.
+        self._editing_secondary = False
 
         # Full-resolution cloud positions used for picking.
         self._prim_cloud = None          # (N, 3) primary points (world space)
@@ -75,6 +79,31 @@ class ManualAlignTool(AbstractTool):
         if self.secondary_anchors is None:
             self.secondary_anchors = np.empty((0, 3), dtype=np.float32)
 
+    def merge_anchors(self, primary_new: np.ndarray, secondary_new: np.ndarray):
+        """Append new candidate anchors, skipping ones that duplicate an existing
+        anchor. Existing anchors keep their indices so current pairs stay valid."""
+        self.ensure_anchor_arrays()
+        self.primary_anchors = self._append_unique(self.primary_anchors, primary_new)
+        self.secondary_anchors = self._append_unique(self.secondary_anchors, secondary_new)
+
+    @staticmethod
+    def _append_unique(existing: np.ndarray, new: np.ndarray) -> np.ndarray:
+        if new is None or len(new) == 0:
+            return existing
+        new = np.asarray(new, dtype=np.float32)
+        if existing is None or len(existing) == 0:
+            return new.copy()
+        # Tolerance scaled to the data so exact FPS re-adds are dropped while
+        # genuinely distinct features (always far apart) are kept.
+        extent = float(np.ptp(np.vstack((existing, new)), axis=0).max())
+        tol = max(extent, 1e-6) * 1e-4
+        tree = cKDTree(existing)
+        dist, _ = tree.query(new)
+        keep = new[dist > tol]
+        if len(keep) == 0:
+            return existing
+        return np.vstack((existing, keep)).astype(np.float32)
+
     def set_clouds(self, primary_cloud: np.ndarray, secondary_cloud: np.ndarray):
         """Provide the raw point positions used to snap manual picks."""
         self._prim_cloud = None if primary_cloud is None else np.ascontiguousarray(
@@ -99,13 +128,33 @@ class ManualAlignTool(AbstractTool):
         self.active_selection = None
         self.hover = None
 
+    def set_editing_secondary(self, editing_secondary: bool):
+        self._editing_secondary = bool(editing_secondary)
+
+    # Order the hotkey cycles through.
+    _TARGET_CYCLE = ('auto', 'primary', 'secondary')
+
+    def cycle_pick_target(self) -> str:
+        """Advance the pick target to the next web and return the new value."""
+        try:
+            i = self._TARGET_CYCLE.index(self.pick_target)
+        except ValueError:
+            i = -1
+        self.pick_target = self._TARGET_CYCLE[(i + 1) % len(self._TARGET_CYCLE)]
+        self.hover = None
+        return self.pick_target
+
     # ── projection helpers ─────────────────────────────────────────────────────
 
     def _mvp_for(self, viewport, secondary: bool):
         mvp = viewport.camera.get_mvp_matrix()
-        if secondary:
-            mvp = (mvp @ viewport._secondary_transform).astype(np.float32)
-        return mvp.astype(np.float32)
+        # Each web is drawn either by the active renderer or the reference overlay,
+        # depending on which cloud the user is currently editing. Project with the
+        # SAME model transform the viewport uses to draw that web, so picking lines
+        # up regardless of whether Primary or Secondary is the active cloud.
+        cloud_is_active = (secondary == self._editing_secondary)
+        T = viewport._active_transform if cloud_is_active else viewport._secondary_transform
+        return (mvp @ T).astype(np.float32)
 
     def _project(self, points, mvp, viewport):
         """Project (N,3) points to (N,2) screen coords; points behind camera → -1000."""
@@ -230,8 +279,10 @@ class ManualAlignTool(AbstractTool):
         # Persistent hint banner
         n_p = 0 if self.primary_anchors is None else len(self.primary_anchors)
         n_s = 0 if self.secondary_anchors is None else len(self.secondary_anchors)
-        hint = (f"PICK MODE — click a web to add an anchor, click a dot to remove   "
-                f"[P:{n_p}  S:{n_s}]")
+        target_label = {'auto': 'Nearest', 'primary': 'Primary',
+                        'secondary': 'Secondary'}.get(self.pick_target, self.pick_target)
+        hint = (f"PICK MODE — click a web to add, click a dot to remove   "
+                f"[P:{n_p}  S:{n_s}]   target: {target_label}  (E to switch)")
         painter.setFont(QFont("", 10))
         fm = painter.fontMetrics()
         tw = fm.horizontalAdvance(hint)
