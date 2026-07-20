@@ -50,6 +50,9 @@ class ManualAlignTool(AbstractTool):
         # Live hover result, recomputed on mouse move while in pick mode.
         # ('add', kind, point3d, (sx, sy)) or ('remove', kind, anchor_idx, (sx, sy))
         self.hover = None
+        # Last cursor position (logical px) so the overlay can re-snap the hover
+        # marker every frame as the camera orbits, not just on mouse-move events.
+        self._last_cursor = None
 
     # ── activation / data ─────────────────────────────────────────────────────
 
@@ -194,6 +197,13 @@ class ManualAlignTool(AbstractTool):
         draw_circles(self._proj_prim, PRIMARY_COLOR, 'primary')
 
         if self.mode == 'pick':
+            # Re-snap the hover marker every frame so it tracks the point under the
+            # crosshair/cursor as the camera moves (fixes the marker drifting away
+            # from the geometry in FPS mode and during orbit).
+            if self._viewport is not None:
+                cx, cy = self._cursor_xy(self._viewport)
+                if cx is not None:
+                    self._update_hover(cx, cy, self._viewport)
             self._draw_pick_overlay(painter)
 
     def _draw_pick_overlay(self, painter: QPainter) -> None:
@@ -280,8 +290,12 @@ class ManualAlignTool(AbstractTool):
 
     def _pick_press(self, event, viewport) -> None:
         self.ensure_anchor_arrays()
-        x = event.position().x()
-        y = event.position().y()
+        # In FPS mode the cursor is locked to the centre crosshair, so pick there.
+        if getattr(viewport, '_fps_mode', False):
+            x, y = viewport.width() / 2.0, viewport.height() / 2.0
+        else:
+            x = event.position().x()
+            y = event.position().y()
 
         # Recompute hover for this exact position (mouse_move may lag a click).
         self._update_hover(x, y, viewport)
@@ -308,7 +322,8 @@ class ManualAlignTool(AbstractTool):
 
     def mouse_move(self, event, viewport) -> None:
         if self.mode == 'pick':
-            self._update_hover(event.position().x(), event.position().y(), viewport)
+            self._last_cursor = (event.position().x(), event.position().y())
+            self._update_hover(*self._last_cursor, viewport)
         else:
             self.project_anchors(viewport)
         viewport.update()
@@ -317,6 +332,15 @@ class ManualAlignTool(AbstractTool):
         pass
 
     # ── pick helpers ────────────────────────────────────────────────────────────
+
+    def _cursor_xy(self, viewport):
+        """Effective pick location: the centre crosshair in FPS mode, else the
+        last known cursor position. Returns (x, y) or (None, None)."""
+        if getattr(viewport, '_fps_mode', False):
+            return viewport.width() / 2.0, viewport.height() / 2.0
+        if self._last_cursor is not None:
+            return self._last_cursor
+        return None, None
 
     def _update_hover(self, x, y, viewport):
         """Decide what a click at (x, y) would do and cache it for overlay + press."""

@@ -235,7 +235,7 @@ class MergePanel(QDockWidget):
         self._btn_anchor_mode.setFixedHeight(32)
         self._btn_anchor_mode.setEnabled(False)
         self._btn_anchor_mode.setToolTip("Extract key anchors and enter manual pairing mode.")
-        self._btn_anchor_mode.toggled.connect(self.anchor_mode_toggled)
+        self._btn_anchor_mode.toggled.connect(self._on_anchor_toggled)
         manual_layout.addWidget(self._btn_anchor_mode)
         
         self._lbl_anchor_status = QLabel("0 anchors paired")
@@ -405,7 +405,16 @@ class MergePanel(QDockWidget):
         self._lbl_pick_status.setText(
             f"Picked — Primary: {n_primary}  Secondary: {n_secondary}")
 
+    def _on_anchor_toggled(self, checked: bool) -> None:
+        # Anchor-pairing and picking are mutually exclusive modes.
+        if checked and self._btn_pick_mode.isChecked():
+            self._btn_pick_mode.setChecked(False)
+        self.anchor_mode_toggled.emit(checked)
+
     def _on_pick_toggled(self, checked: bool) -> None:
+        # Anchor-pairing and picking are mutually exclusive modes.
+        if checked and self._btn_anchor_mode.isChecked():
+            self._btn_anchor_mode.setChecked(False)
         self._btn_pick_mode.setText(
             "Picking… (click a web)" if checked else "Pick Anchors on Web")
         self._cmb_pick_target.setEnabled(checked)

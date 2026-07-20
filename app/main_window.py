@@ -1100,50 +1100,61 @@ class MainWindow(QMainWindow):
             if self._pc_primary is None or self._pc_secondary is None:
                 self._merge_panel._btn_anchor_mode.setChecked(False)
                 return
-            
-            from app.data.webmerge import farthest_point_sampling
-            from scipy.spatial import cKDTree
-            
-            p_pos = self._pc_primary.positions[self._pc_primary.alive_mask]
-            s_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
-            
-            # 1. Get 100 anchors on Primary (Red dots)
-            p_idx = farthest_point_sampling(p_pos, 100) if len(p_pos) > 100 else np.arange(len(p_pos))
-            p_anchors = p_pos[p_idx]
-            
-            # 2. Get ~100 corresponding anchors on Secondary (Blue dots)
-            # Map primary anchors into secondary's local space
-            T_inv = np.linalg.inv(self._secondary_alignment_T.astype(np.float64))
-            p_h = np.concatenate([p_anchors.astype(np.float64), np.ones((len(p_anchors), 1))], axis=1)
-            p_in_s = (T_inv @ p_h.T).T[:, :3].astype(np.float32)
-            
-            # Find nearest actual secondary point for each primary feature
-            tree = cKDTree(s_pos)
-            _, nearest_s_idx = tree.query(p_in_s)
-            s_anchors = s_pos[nearest_s_idx]
-            
-            # Also add 30 independent FPS points to Secondary just in case 
-            # there are unique V-features only present in the secondary web
-            s_fps_idx = farthest_point_sampling(s_pos, 30) if len(s_pos) > 30 else np.arange(len(s_pos))
-            s_anchors = np.vstack((s_anchors, s_pos[s_fps_idx]))
-            
-            # Filter to unique secondary anchors
-            s_anchors = np.unique(s_anchors, axis=0)
-            
+
             self._viewport.tool_manager.set_tool('manual_align')
             tool = self._viewport.tool_manager.active_tool
-            tool.set_anchors(p_anchors, s_anchors)
+
+            # Only auto-generate candidate anchors on a fresh start. If anchors
+            # already exist (e.g. manually picked ones), keep them so the user's
+            # work persists — regenerating would silently wipe it.
+            has_anchors = ((tool.primary_anchors is not None and len(tool.primary_anchors) > 0) or
+                           (tool.secondary_anchors is not None and len(tool.secondary_anchors) > 0))
+            if not has_anchors:
+                p_anchors, s_anchors = self._generate_candidate_anchors()
+                tool.set_anchors(p_anchors, s_anchors)
+
+            tool.ensure_anchor_arrays()
             self._feed_clouds_to_tool()
-            # Preserve pick mode if the user already had it on; else pairing mode.
-            tool.set_mode('pick' if self._merge_panel._btn_pick_mode.isChecked() else 'pair')
-            self._merge_panel.set_anchor_status(0)
-            self._merge_panel.set_pick_status(len(p_anchors), len(s_anchors))
+            tool.set_mode('pair')
+            self._merge_panel.set_anchor_status(len(tool.pairs))
+            self._merge_panel.set_pick_status(len(tool.primary_anchors),
+                                              len(tool.secondary_anchors))
         else:
-            # Don't leave the manual tool if the user is still picking anchors.
-            if self._merge_panel._btn_pick_mode.isChecked():
-                return
             if self._viewport.tool_manager.active_name == 'manual_align':
                 self._viewport.tool_manager.set_tool('lasso')
+        self._viewport.update()
+
+    def _generate_candidate_anchors(self):
+        """FPS-sample candidate anchors on both webs for the pairing workflow."""
+        from app.data.webmerge import farthest_point_sampling
+        from scipy.spatial import cKDTree
+
+        p_pos = self._pc_primary.positions[self._pc_primary.alive_mask]
+        s_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
+
+        # 1. Get 100 anchors on Primary (Red dots)
+        p_idx = farthest_point_sampling(p_pos, 100) if len(p_pos) > 100 else np.arange(len(p_pos))
+        p_anchors = p_pos[p_idx]
+
+        # 2. Get ~100 corresponding anchors on Secondary (Blue dots)
+        # Map primary anchors into secondary's local space
+        T_inv = np.linalg.inv(self._secondary_alignment_T.astype(np.float64))
+        p_h = np.concatenate([p_anchors.astype(np.float64), np.ones((len(p_anchors), 1))], axis=1)
+        p_in_s = (T_inv @ p_h.T).T[:, :3].astype(np.float32)
+
+        # Find nearest actual secondary point for each primary feature
+        tree = cKDTree(s_pos)
+        _, nearest_s_idx = tree.query(p_in_s)
+        s_anchors = s_pos[nearest_s_idx]
+
+        # Also add 30 independent FPS points to Secondary just in case
+        # there are unique V-features only present in the secondary web
+        s_fps_idx = farthest_point_sampling(s_pos, 30) if len(s_pos) > 30 else np.arange(len(s_pos))
+        s_anchors = np.vstack((s_anchors, s_pos[s_fps_idx]))
+
+        # Filter to unique secondary anchors
+        s_anchors = np.unique(s_anchors, axis=0)
+        return p_anchors, s_anchors
 
     def on_manual_anchors_paired(self, pairs_count: int) -> None:
         self._merge_panel.set_anchor_status(pairs_count)
