@@ -15,7 +15,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QDoubleSpinBox, QSpinBox,
-    QGroupBox, QScrollArea,
+    QGroupBox, QScrollArea, QComboBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -29,6 +29,8 @@ class MergePanel(QDockWidget):
     run_cpd_clicked         = pyqtSignal()
     run_webmerge_clicked    = pyqtSignal()
     anchor_mode_toggled     = pyqtSignal(bool)
+    pick_mode_toggled       = pyqtSignal(bool)
+    pick_target_changed     = pyqtSignal(str)   # 'auto' | 'primary' | 'secondary'
     apply_warp_clicked      = pyqtSignal()
     auto_match_clicked      = pyqtSignal()
     merge_clicked           = pyqtSignal()
@@ -239,7 +241,37 @@ class MergePanel(QDockWidget):
         self._lbl_anchor_status = QLabel("0 anchors paired")
         self._lbl_anchor_status.setStyleSheet("color: #aaa; font-size: 11px;")
         manual_layout.addWidget(self._lbl_anchor_status)
-        
+
+        # ── Manual picking ────────────────────────────────────────────────────
+        self._btn_pick_mode = QPushButton("Pick Anchors on Web")
+        self._btn_pick_mode.setCheckable(True)
+        self._btn_pick_mode.setFixedHeight(32)
+        self._btn_pick_mode.setEnabled(False)
+        self._btn_pick_mode.setToolTip(
+            "Manually drop anchors: click on either web to add a point,\n"
+            "click an existing dot to remove it. Add as many as you like.")
+        self._btn_pick_mode.toggled.connect(self._on_pick_toggled)
+        manual_layout.addWidget(self._btn_pick_mode)
+
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Add to:"))
+        self._cmb_pick_target = QComboBox()
+        self._cmb_pick_target.addItem("Nearest web", "auto")
+        self._cmb_pick_target.addItem("Primary only", "primary")
+        self._cmb_pick_target.addItem("Secondary only", "secondary")
+        self._cmb_pick_target.setEnabled(False)
+        self._cmb_pick_target.setToolTip(
+            "Which web a click snaps to. 'Nearest web' picks whichever dot is\n"
+            "closest to the cursor; lock to one web if they overlap.")
+        self._cmb_pick_target.currentIndexChanged.connect(
+            lambda _=0: self.pick_target_changed.emit(self._cmb_pick_target.currentData()))
+        target_row.addWidget(self._cmb_pick_target, stretch=1)
+        manual_layout.addLayout(target_row)
+
+        self._lbl_pick_status = QLabel("Picked — Primary: 0  Secondary: 0")
+        self._lbl_pick_status.setStyleSheet("color: #aaa; font-size: 11px;")
+        manual_layout.addWidget(self._lbl_pick_status)
+
         self._btn_auto_match = QPushButton("Auto-Match Selected Regions")
         self._btn_auto_match.setFixedHeight(32)
         self._btn_auto_match.setEnabled(False)
@@ -348,8 +380,11 @@ class MergePanel(QDockWidget):
         self._lbl_cpd_status.setText("")
         self._lbl_webmerge_status.setText("")
         self._lbl_anchor_status.setText("0 anchors paired")
+        self._lbl_pick_status.setText("Picked — Primary: 0  Secondary: 0")
         if self._btn_anchor_mode.isChecked():
             self._btn_anchor_mode.setChecked(False)
+        if self._btn_pick_mode.isChecked():
+            self._btn_pick_mode.setChecked(False)
         self._set_secondary_controls_enabled(False)
         self._reset_transform_silent()
 
@@ -365,6 +400,24 @@ class MergePanel(QDockWidget):
     def set_anchor_status(self, pairs: int) -> None:
         self._lbl_anchor_status.setText(f"{pairs} anchors paired")
         self._btn_apply_warp.setEnabled(pairs > 0)
+
+    def set_pick_status(self, n_primary: int, n_secondary: int) -> None:
+        self._lbl_pick_status.setText(
+            f"Picked — Primary: {n_primary}  Secondary: {n_secondary}")
+
+    def _on_pick_toggled(self, checked: bool) -> None:
+        self._btn_pick_mode.setText(
+            "Picking… (click a web)" if checked else "Pick Anchors on Web")
+        self._cmb_pick_target.setEnabled(checked)
+        self.pick_mode_toggled.emit(checked)
+
+    def get_pick_target(self) -> str:
+        return self._cmb_pick_target.currentData()
+
+    def set_pick_mode_unchecked(self) -> None:
+        """Force the pick button off (e.g. when leaving anchor mode)."""
+        if self._btn_pick_mode.isChecked():
+            self._btn_pick_mode.setChecked(False)
 
     def reset_transform_spinboxes(self) -> None:
         """Reset all transform spinboxes to zero without emitting transform_changed."""
@@ -394,6 +447,7 @@ class MergePanel(QDockWidget):
         self._btn_cpd.setEnabled(enabled)
         self._btn_webmerge.setEnabled(enabled)
         self._btn_anchor_mode.setEnabled(enabled)
+        self._btn_pick_mode.setEnabled(enabled)
         self._btn_auto_match.setEnabled(enabled)
         self._btn_merge.setEnabled(enabled)
         self._btn_reset_xform.setEnabled(enabled)

@@ -349,6 +349,8 @@ class MainWindow(QMainWindow):
         self._merge_panel.run_cpd_clicked.connect(self._run_cpd)
         self._merge_panel.run_webmerge_clicked.connect(self._run_webmerge)
         self._merge_panel.anchor_mode_toggled.connect(self._on_anchor_mode_toggled)
+        self._merge_panel.pick_mode_toggled.connect(self._on_pick_mode_toggled)
+        self._merge_panel.pick_target_changed.connect(self._on_pick_target_changed)
         self._merge_panel.apply_warp_clicked.connect(self._apply_manual_warp)
         self._merge_panel.auto_match_clicked.connect(self._auto_match_regions)
         self._merge_panel.merge_clicked.connect(self._merge_clouds)
@@ -1129,14 +1131,69 @@ class MainWindow(QMainWindow):
             s_anchors = np.unique(s_anchors, axis=0)
             
             self._viewport.tool_manager.set_tool('manual_align')
-            self._viewport.tool_manager.active_tool.set_anchors(p_anchors, s_anchors)
+            tool = self._viewport.tool_manager.active_tool
+            tool.set_anchors(p_anchors, s_anchors)
+            self._feed_clouds_to_tool()
+            # Preserve pick mode if the user already had it on; else pairing mode.
+            tool.set_mode('pick' if self._merge_panel._btn_pick_mode.isChecked() else 'pair')
             self._merge_panel.set_anchor_status(0)
+            self._merge_panel.set_pick_status(len(p_anchors), len(s_anchors))
         else:
+            # Don't leave the manual tool if the user is still picking anchors.
+            if self._merge_panel._btn_pick_mode.isChecked():
+                return
             if self._viewport.tool_manager.active_name == 'manual_align':
                 self._viewport.tool_manager.set_tool('lasso')
 
     def on_manual_anchors_paired(self, pairs_count: int) -> None:
         self._merge_panel.set_anchor_status(pairs_count)
+
+    def on_manual_anchors_changed(self, n_primary: int, n_secondary: int,
+                                  pairs_count: int) -> None:
+        """Called by the manual-pick tool whenever anchors are added/removed."""
+        self._merge_panel.set_pick_status(n_primary, n_secondary)
+        self._merge_panel.set_anchor_status(pairs_count)
+
+    def _feed_clouds_to_tool(self) -> None:
+        """Hand the current alive point positions to the manual-align tool for picking."""
+        tool = self._viewport.tool_manager._tools.get('manual_align')
+        if tool is None:
+            return
+        p_pos = (self._pc_primary.positions[self._pc_primary.alive_mask]
+                 if self._pc_primary is not None else None)
+        s_pos = (self._pc_secondary.positions[self._pc_secondary.alive_mask]
+                 if self._pc_secondary is not None else None)
+        tool.set_clouds(p_pos, s_pos)
+
+    def _on_pick_mode_toggled(self, checked: bool) -> None:
+        if checked:
+            if self._pc_primary is None or self._pc_secondary is None:
+                self._merge_panel.set_pick_mode_unchecked()
+                return
+            # Enter (or stay in) the manual-align tool without wiping existing anchors.
+            self._viewport.tool_manager.set_tool('manual_align')
+            tool = self._viewport.tool_manager.active_tool
+            tool.ensure_anchor_arrays()
+            self._feed_clouds_to_tool()
+            tool.pick_target = self._merge_panel.get_pick_target()
+            tool.set_mode('pick')
+            self.on_manual_anchors_changed(
+                len(tool.primary_anchors), len(tool.secondary_anchors), len(tool.pairs))
+        else:
+            tool = self._viewport.tool_manager._tools.get('manual_align')
+            if tool is not None:
+                tool.set_mode('pair')
+            # If anchor (pairing) mode is also off, hand the viewport back to lasso.
+            if not self._merge_panel._btn_anchor_mode.isChecked():
+                if self._viewport.tool_manager.active_name == 'manual_align':
+                    self._viewport.tool_manager.set_tool('lasso')
+        self._viewport.update()
+
+    def _on_pick_target_changed(self, target: str) -> None:
+        tool = self._viewport.tool_manager._tools.get('manual_align')
+        if tool is not None:
+            tool.pick_target = target
+            self._viewport.update()
 
     def _apply_secondary_cloud(self, pc) -> None:
         self._pc_secondary = pc
