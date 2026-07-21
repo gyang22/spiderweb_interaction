@@ -351,6 +351,8 @@ class MainWindow(QMainWindow):
         self._merge_panel.run_cpd_clicked.connect(self._run_cpd)
         self._merge_panel.run_webmerge_clicked.connect(self._run_webmerge)
         self._merge_panel.anchor_mode_toggled.connect(self._on_anchor_mode_toggled)
+        self._merge_panel.clear_anchors_clicked.connect(self._on_clear_anchors)
+        self._merge_panel.regen_anchors_clicked.connect(self._on_regen_anchors)
         self._merge_panel.pick_mode_toggled.connect(self._on_pick_mode_toggled)
         self._merge_panel.pick_target_changed.connect(self._on_pick_target_changed)
         self._merge_panel.apply_warp_clicked.connect(self._apply_manual_warp)
@@ -1164,6 +1166,42 @@ class MainWindow(QMainWindow):
         else:
             if self._viewport.tool_manager.active_name == 'manual_align':
                 self._viewport.tool_manager.set_tool('lasso')
+        self._viewport.update()
+
+    def _on_clear_anchors(self) -> None:
+        """Forget every anchor / pairing so the user can start the pairing over."""
+        tool = self._viewport.tool_manager._tools.get('manual_align')
+        if tool is None:
+            return
+        n = 0 if tool.primary_anchors is None else len(tool.primary_anchors)
+        n += 0 if tool.secondary_anchors is None else len(tool.secondary_anchors)
+        if n and QMessageBox.question(
+                self, "Clear anchors",
+                f"Forget all {n} anchors and {len(tool.pairs)} pairings?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        tool.clear_anchors()
+        self.on_manual_anchors_changed(0, 0, 0)
+        self._viewport.update()
+
+    def _on_regen_anchors(self) -> None:
+        """Re-sample the automatic candidate anchors, keeping manual picks/pairs."""
+        if self._pc_primary is None or self._pc_secondary is None:
+            return
+        if not self._merge_panel._btn_anchor_mode.isChecked():
+            # Entering anchor mode already samples a fresh set of candidates.
+            self._merge_panel._btn_anchor_mode.setChecked(True)
+            return
+        tool = self._viewport.tool_manager._tools.get('manual_align')
+        if tool is None:
+            return
+        tool.ensure_anchor_arrays()
+        p_anchors, s_anchors = self._generate_candidate_anchors()
+        tool.merge_anchors(p_anchors, s_anchors)
+        self._feed_clouds_to_tool()
+        self.on_manual_anchors_changed(len(tool.primary_anchors),
+                                       len(tool.secondary_anchors),
+                                       len(tool.pairs))
         self._viewport.update()
 
     def _generate_candidate_anchors(self):

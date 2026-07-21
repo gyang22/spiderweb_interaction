@@ -33,6 +33,8 @@ class MergePanel(QDockWidget):
     anchor_mode_toggled     = pyqtSignal(bool)
     pick_mode_toggled       = pyqtSignal(bool)
     pick_target_changed     = pyqtSignal(str)   # 'auto' | 'primary' | 'secondary'
+    clear_anchors_clicked   = pyqtSignal()
+    regen_anchors_clicked   = pyqtSignal()
     apply_warp_clicked      = pyqtSignal()
     auto_match_clicked      = pyqtSignal()
     merge_clicked           = pyqtSignal()
@@ -274,6 +276,25 @@ class MergePanel(QDockWidget):
         self._lbl_pick_status.setStyleSheet("color: #aaa; font-size: 11px;")
         manual_layout.addWidget(self._lbl_pick_status)
 
+        anchor_edit_row = QHBoxLayout()
+        self._btn_regen_anchors = QPushButton("Regenerate Auto Anchors")
+        self._btn_regen_anchors.setFixedHeight(28)
+        self._btn_regen_anchors.setEnabled(False)
+        self._btn_regen_anchors.setToolTip(
+            "Re-sample the automatic candidate anchors on both webs.\n"
+            "Manually picked anchors and existing pairs are kept.")
+        self._btn_regen_anchors.clicked.connect(self.regen_anchors_clicked)
+        anchor_edit_row.addWidget(self._btn_regen_anchors, stretch=1)
+
+        self._btn_clear_anchors = QPushButton("Clear Anchors")
+        self._btn_clear_anchors.setFixedHeight(28)
+        self._btn_clear_anchors.setEnabled(False)
+        self._btn_clear_anchors.setToolTip(
+            "Forget every anchor and pairing so you can start over.")
+        self._btn_clear_anchors.clicked.connect(self.clear_anchors_clicked)
+        anchor_edit_row.addWidget(self._btn_clear_anchors, stretch=1)
+        manual_layout.addLayout(anchor_edit_row)
+
         self._btn_auto_match = QPushButton("Auto-Match Selected Regions")
         self._btn_auto_match.setFixedHeight(32)
         self._btn_auto_match.setEnabled(False)
@@ -468,6 +489,8 @@ class MergePanel(QDockWidget):
         self._btn_anchor_mode.setEnabled(enabled)
         self._btn_pick_mode.setEnabled(enabled)
         self._btn_auto_match.setEnabled(enabled)
+        self._btn_clear_anchors.setEnabled(enabled)
+        self._btn_regen_anchors.setEnabled(enabled)
         self._btn_merge.setEnabled(enabled)
         self._btn_reset_xform.setEnabled(enabled)
         self._spin_icp_iter.setEnabled(enabled)

@@ -72,6 +72,16 @@ class ManualAlignTool(AbstractTool):
         self.active_selection = None
         self.pairs = []
 
+    def clear_anchors(self):
+        """Forget every anchor and pairing (both auto-sampled and manually picked)."""
+        self.primary_anchors = None
+        self.secondary_anchors = None
+        self.active_selection = None
+        self.pairs = []
+        self._proj_prim = np.empty((0, 2))
+        self._proj_sec = np.empty((0, 2))
+        self.hover = None
+
     def ensure_anchor_arrays(self):
         """Make sure the anchor arrays exist so picking can append to them."""
         if self.primary_anchors is None:
