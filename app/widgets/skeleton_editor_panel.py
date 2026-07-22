@@ -18,6 +18,12 @@ class SkeletonEditorPanel(QDockWidget):
     reextract_clicked      = pyqtSignal()
     delete_nodes_clicked   = pyqtSignal()
     smooth_clicked         = pyqtSignal(float)
+    simplify_chains_clicked    = pyqtSignal()
+    prune_leaves_clicked       = pyqtSignal()
+    collapse_triangles_clicked = pyqtSignal(float)
+    grow_rays_clicked          = pyqtSignal(float)
+    beam_latch_clicked         = pyqtSignal(float)
+    run_pipeline_clicked       = pyqtSignal(float, float, float)  # tol, beam_r, tri
 
     def __init__(self, parent=None) -> None:
         super().__init__("Skeleton Node Editor", parent)
@@ -157,6 +163,105 @@ class SkeletonEditorPanel(QDockWidget):
 
         layout.addWidget(smooth_group)
 
+        # ── Topology refinement ───────────────────────────────────────────────
+        # Global operations (act on the whole skeleton, ignoring the selection).
+        refine_group = QGroupBox("Topology Refinement")
+        refine_layout = QVBoxLayout(refine_group)
+        refine_layout.setSpacing(4)
+
+        self._btn_simplify = QPushButton("Simplify Chains")
+        self._btn_simplify.setFixedHeight(28)
+        self._btn_simplify.setToolTip(
+            "Collapse chains of degree-2 nodes into single direct edges between\n"
+            "junctions/endpoints. Acts on the whole skeleton.")
+        self._btn_simplify.clicked.connect(self.simplify_chains_clicked)
+        refine_layout.addWidget(self._btn_simplify)
+
+        self._btn_prune = QPushButton("Prune Leaves (deg-1)")
+        self._btn_prune.setFixedHeight(28)
+        self._btn_prune.setToolTip(
+            "Remove all degree-1 'hair' edges in a single pass and drop the\n"
+            "orphaned nodes. Acts on the whole skeleton.")
+        self._btn_prune.clicked.connect(self.prune_leaves_clicked)
+        refine_layout.addWidget(self._btn_prune)
+
+        tri_row = QHBoxLayout()
+        tri_row.addWidget(QLabel("Tri size:"))
+        self._spin_tri = QDoubleSpinBox()
+        self._spin_tri.setRange(0.0, 10000.0)
+        self._spin_tri.setDecimals(2)
+        self._spin_tri.setSingleStep(1.0)
+        self._spin_tri.setValue(5.0)
+        self._spin_tri.setToolTip(
+            "Max edge length (point-coordinate units) for a 3-clique to be\n"
+            "collapsed into its centroid.")
+        tri_row.addWidget(self._spin_tri)
+        self._btn_collapse = QPushButton("Collapse Triangles")
+        self._btn_collapse.setFixedHeight(28)
+        self._btn_collapse.setToolTip(
+            "Merge small triangles (all edges <= 'Tri size') into a single node\n"
+            "at their centroid to remove jittery noise.")
+        self._btn_collapse.clicked.connect(
+            lambda: self.collapse_triangles_clicked.emit(self._spin_tri.value()))
+        tri_row.addWidget(self._btn_collapse)
+        refine_layout.addLayout(tri_row)
+
+        ray_row = QHBoxLayout()
+        ray_row.addWidget(QLabel("Ray tol:"))
+        self._spin_ray = QDoubleSpinBox()
+        self._spin_ray.setRange(0.0, 10000.0)
+        self._spin_ray.setDecimals(2)
+        self._spin_ray.setSingleStep(0.5)
+        self._spin_ray.setValue(1.0)
+        self._spin_ray.setToolTip(
+            "Max distance (point-coordinate units) between two endpoint rays for\n"
+            "them to be snapped together with a new junction node.")
+        ray_row.addWidget(self._spin_ray)
+        self._btn_grow_rays = QPushButton("Grow Rays")
+        self._btn_grow_rays.setFixedHeight(28)
+        self._btn_grow_rays.setToolTip(
+            "Shoot rays outward from dangling endpoints; where two rays nearly\n"
+            "intersect, add a junction node connecting both.")
+        self._btn_grow_rays.clicked.connect(
+            lambda: self.grow_rays_clicked.emit(self._spin_ray.value()))
+        ray_row.addWidget(self._btn_grow_rays)
+        refine_layout.addLayout(ray_row)
+
+        beam_row = QHBoxLayout()
+        beam_row.addWidget(QLabel("Beam r:"))
+        self._spin_beam = QDoubleSpinBox()
+        self._spin_beam.setRange(0.0, 10000.0)
+        self._spin_beam.setDecimals(2)
+        self._spin_beam.setSingleStep(1.0)
+        self._spin_beam.setValue(5.0)
+        self._spin_beam.setToolTip(
+            "Radius (point-coordinate units) of the fat beam shot from each\n"
+            "endpoint when latching onto the nearest point.")
+        beam_row.addWidget(self._spin_beam)
+        self._btn_beam = QPushButton("Beam Latch")
+        self._btn_beam.setFixedHeight(28)
+        self._btn_beam.setToolTip(
+            "From each degree-1 endpoint, shoot a fat beam along its outward\n"
+            "direction and connect it to the closest point caught inside.")
+        self._btn_beam.clicked.connect(
+            lambda: self.beam_latch_clicked.emit(self._spin_beam.value()))
+        beam_row.addWidget(self._btn_beam)
+        refine_layout.addLayout(beam_row)
+
+        self._btn_pipeline = QPushButton("Run Full Refinement Pipeline")
+        self._btn_pipeline.setFixedHeight(32)
+        self._btn_pipeline.setToolTip(
+            "Run all refinements in order: prune → grow rays → prune →\n"
+            "beam latch → (simplify chains + collapse triangles, looped) using\n"
+            "the Ray tol / Beam r / Tri size values above. One undo step.")
+        self._btn_pipeline.clicked.connect(
+            lambda: self.run_pipeline_clicked.emit(
+                self._spin_ray.value(), self._spin_beam.value(),
+                self._spin_tri.value()))
+        refine_layout.addWidget(self._btn_pipeline)
+
+        layout.addWidget(refine_group)
+
         # ── Degree distribution ───────────────────────────────────────────────
         stats_group = QGroupBox("Degree distribution")
         stats_layout = QVBoxLayout(stats_group)
@@ -212,5 +317,7 @@ class SkeletonEditorPanel(QDockWidget):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for w in (self._btn_sel_all, self._btn_desel, self._btn_sel_degree,
-                  self._btn_reextract, self._btn_delete, self._btn_smooth):
+                  self._btn_reextract, self._btn_delete, self._btn_smooth,
+                  self._btn_simplify, self._btn_prune, self._btn_collapse,
+                  self._btn_grow_rays, self._btn_beam, self._btn_pipeline):
             w.setEnabled(enabled)

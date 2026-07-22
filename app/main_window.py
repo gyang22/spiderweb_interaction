@@ -34,6 +34,7 @@ from app.data.strand_graph import (
     _build_knn_edges, _kruskal_mst,
 )
 from app.data.smooth import smooth_graph
+from app.data import refine
 from app.data.graph_io import export_graph_json, import_graph_json
 from app.data.downsample import voxel_downsample
 from app.data.align import icp_align, cpd_align, euler_to_transform, webmerge_align
@@ -371,6 +372,12 @@ class MainWindow(QMainWindow):
         self._skel_editor.reextract_clicked.connect(self._reextract_selected_skel_nodes)
         self._skel_editor.delete_nodes_clicked.connect(self._delete_selected_skel_nodes)
         self._skel_editor.smooth_clicked.connect(self._smooth_selected_skel_nodes)
+        self._skel_editor.simplify_chains_clicked.connect(self._refine_simplify_chains)
+        self._skel_editor.prune_leaves_clicked.connect(self._refine_prune_leaves)
+        self._skel_editor.collapse_triangles_clicked.connect(self._refine_collapse_triangles)
+        self._skel_editor.grow_rays_clicked.connect(self._refine_grow_rays)
+        self._skel_editor.beam_latch_clicked.connect(self._refine_beam_latch)
+        self._skel_editor.run_pipeline_clicked.connect(self._refine_run_pipeline)
         self._viewport.skel_selection_changed.connect(self._on_skel_selection_changed)
 
         self._build_menu()
@@ -870,6 +877,53 @@ class MainWindow(QMainWindow):
             old_skel, new_skel, self._set_skeleton, "smooth selected nodes"
         )
         self._undo_stack.push(cmd)
+
+    # ── Topology refinement (whole-skeleton, ported from RayRecon) ─────────────
+
+    def _apply_refinement(self, new_skel: StrandGraph, description: str) -> None:
+        """Wrap a whole-skeleton refinement result in an undoable command."""
+        cmd = EditSkeletonCommand(self._skeleton, new_skel, self._set_skeleton,
+                                  description)
+        self._undo_stack.push(cmd)
+
+    def _refine_simplify_chains(self) -> None:
+        if self._skeleton is None:
+            return
+        self._apply_refinement(refine.simplify_chains_graph(self._skeleton),
+                               "simplify chains")
+
+    def _refine_prune_leaves(self) -> None:
+        if self._skeleton is None:
+            return
+        self._apply_refinement(refine.prune_leaves_graph(self._skeleton),
+                               "prune degree-1 leaves")
+
+    def _refine_collapse_triangles(self, threshold: float) -> None:
+        if self._skeleton is None:
+            return
+        self._apply_refinement(
+            refine.collapse_triangles_graph(self._skeleton, threshold),
+            "collapse small triangles")
+
+    def _refine_grow_rays(self, tol: float) -> None:
+        if self._skeleton is None:
+            return
+        self._apply_refinement(refine.grow_rays_graph(self._skeleton, tol),
+                               "grow rays and connect")
+
+    def _refine_beam_latch(self, beam_radius: float) -> None:
+        if self._skeleton is None:
+            return
+        self._apply_refinement(refine.beam_latch_graph(self._skeleton, beam_radius),
+                               "beam-latch endpoints")
+
+    def _refine_run_pipeline(self, tol: float, beam_radius: float,
+                             tri_threshold: float) -> None:
+        if self._skeleton is None:
+            return
+        self._apply_refinement(
+            refine.run_pipeline_graph(self._skeleton, tol, beam_radius, tri_threshold),
+            "run refinement pipeline")
 
     def _skel_select_all(self) -> None:
         if self._viewport._skel_selection is None:
