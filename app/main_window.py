@@ -1396,12 +1396,38 @@ class MainWindow(QMainWindow):
         aligned_pos = (T @ sec_h.T).T[:, :3].astype(np.float32)
         
         warped_pos = tps_warp(aligned_pos, s_anchors, p_anchors)
-        
+
         new_pc = PointCloud(warped_pos, self._pc_secondary.colors[self._pc_secondary.alive_mask])
-        
-        cmd = ReplaceCloudCommand(self._pc_secondary, new_pc, self._apply_secondary_cloud, "Manual Anchor Warp")
+
+        # Move the anchor markers along with the cloud we just warped. The warp
+        # bakes the alignment into the cloud and _apply_secondary_cloud resets
+        # _secondary_alignment_T to identity, but the picked anchors are stored in
+        # the original secondary frame. If they aren't moved too, a second Apply
+        # TPS Warp feeds stale source anchors (still in the old frame) against the
+        # already-warped cloud, so the spline extrapolates wildly. tps_warp maps
+        # the paired source anchors exactly onto their primary targets, so after
+        # this the source and target anchors coincide and re-warping is stable.
+        old_sec_anchors = (None if tool.secondary_anchors is None
+                           else tool.secondary_anchors.copy())
+        if old_sec_anchors is not None and len(old_sec_anchors) > 0:
+            sa_h = np.concatenate(
+                [old_sec_anchors.astype(np.float64),
+                 np.ones((len(old_sec_anchors), 1))], axis=1)
+            sa_aligned = (T @ sa_h.T).T[:, :3].astype(np.float32)
+            new_sec_anchors = tps_warp(sa_aligned, s_anchors, p_anchors).astype(np.float32)
+        else:
+            new_sec_anchors = old_sec_anchors
+
+        def _apply_warp_result(pc, _new=new_pc, _old_a=old_sec_anchors,
+                               _new_a=new_sec_anchors, _tool=tool):
+            # Swap anchors together with the cloud so undo/redo stay consistent.
+            _tool.secondary_anchors = _new_a if pc is _new else _old_a
+            self._apply_secondary_cloud(pc)
+
+        cmd = ReplaceCloudCommand(self._pc_secondary, new_pc, _apply_warp_result,
+                                  "Manual Anchor Warp")
         self._undo_stack.push(cmd)
-        
+
         # Exit mode
         self._merge_panel._btn_anchor_mode.setChecked(False)
 
