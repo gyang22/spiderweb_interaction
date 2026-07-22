@@ -1523,8 +1523,15 @@ class MainWindow(QMainWindow):
         if self._pc_primary is None or self._pc_secondary is None:
             return
 
-        # Apply alignment transform to secondary alive positions
-        T = self._viewport._secondary_transform.astype(np.float64)
+        # Apply alignment transform to secondary alive positions. The secondary's
+        # live alignment (ICP + manual delta) lives in the *active* transform while
+        # we're editing the secondary, and in the *reference-overlay* transform
+        # while editing the primary. Read the right one so the alignment is always
+        # applied — otherwise merging while the secondary is active drops the ICP.
+        if self._editing_secondary:
+            T = self._viewport._active_transform.astype(np.float64)
+        else:
+            T = self._viewport._secondary_transform.astype(np.float64)
         sec_pos    = self._pc_secondary.positions[self._pc_secondary.alive_mask].astype(np.float64)
         ones       = np.ones((len(sec_pos), 1), dtype=np.float64)
         warped_pos = (T @ np.concatenate([sec_pos, ones], axis=1).T).T[:, :3].astype(np.float32)
@@ -1544,6 +1551,11 @@ class MainWindow(QMainWindow):
         self._secondary_alignment_T = np.eye(4, dtype=np.float32)
         self._editing_secondary = False
         self._viewport.clear_reference()
+        # The merged points are already baked into primary-frame coordinates, so
+        # the active cloud must render at identity. If the secondary was active,
+        # _active_transform still holds its alignment — reset it or the merged
+        # cloud would be drawn doubly-transformed.
+        self._viewport.update_active_transform(np.eye(4, dtype=np.float32))
         self._merge_panel.clear_secondary_status()
 
         # Push: execute() calls _apply_active_cloud(merged_pc)
