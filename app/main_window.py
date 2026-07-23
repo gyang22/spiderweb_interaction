@@ -1276,12 +1276,15 @@ class MainWindow(QMainWindow):
             self._viewport.tool_manager.set_tool('manual_align')
             tool = self._viewport.tool_manager.active_tool
 
-            # Show both: keep any manually-picked anchors and merge in the auto
-            # FPS candidates (deduplicated, existing indices preserved so pairs
-            # stay valid). Manual picks are never lost.
+            # Auto-sample FPS candidates only the FIRST time (when no anchors
+            # exist yet). Re-entering anchor mode must NOT keep piling on new
+            # random candidates — that made the dot count grow every toggle. Use
+            # "Regenerate Auto Anchors" to deliberately resample; manual picks and
+            # existing pairs are always preserved.
             tool.ensure_anchor_arrays()
-            p_anchors, s_anchors = self._generate_candidate_anchors()
-            tool.merge_anchors(p_anchors, s_anchors)
+            if len(tool.primary_anchors) == 0 and len(tool.secondary_anchors) == 0:
+                p_anchors, s_anchors = self._generate_candidate_anchors()
+                tool.merge_anchors(p_anchors, s_anchors)
 
             self._feed_clouds_to_tool()
             tool.set_mode('pair')
