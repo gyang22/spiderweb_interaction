@@ -332,6 +332,10 @@ class ManualAlignTool(AbstractTool):
                 prim_idx = clicked[1] if clicked[0] == 'primary' else self.active_selection[1]
                 sec_idx = clicked[1] if clicked[0] == 'secondary' else self.active_selection[1]
 
+                win = viewport.window()
+                old_state = (win.snapshot_anchor_state()
+                             if hasattr(win, "snapshot_anchor_state") else None)
+
                 # Remove any existing pairs involving these nodes
                 self.pairs = [pair for pair in self.pairs
                               if pair[0] != prim_idx and pair[1] != sec_idx]
@@ -340,8 +344,10 @@ class ManualAlignTool(AbstractTool):
                 self.active_selection = None
 
                 # Notify UI via manager -> viewport -> parent window
-                if hasattr(viewport.window(), "on_manual_anchors_paired"):
-                    viewport.window().on_manual_anchors_paired(len(self.pairs))
+                if hasattr(win, "on_manual_anchors_paired"):
+                    win.on_manual_anchors_paired(len(self.pairs))
+                if old_state is not None and hasattr(win, "commit_anchor_edit"):
+                    win.commit_anchor_edit(old_state, "pair anchors")
             else:
                 self.active_selection = clicked
         else:
@@ -365,6 +371,11 @@ class ManualAlignTool(AbstractTool):
             viewport.update()
             return
 
+        # Snapshot before mutating so the add/remove is a single undo step.
+        win = viewport.window()
+        old_state = (win.snapshot_anchor_state()
+                     if hasattr(win, "snapshot_anchor_state") else None)
+
         action, kind, payload, _ = self.hover
         if action == 'remove':
             self._remove_anchor(kind, payload)
@@ -377,6 +388,9 @@ class ManualAlignTool(AbstractTool):
                                                     payload.astype(np.float32)))
 
         self._notify_counts(viewport)
+        if old_state is not None and hasattr(win, "commit_anchor_edit"):
+            win.commit_anchor_edit(
+                old_state, "remove anchor" if action == 'remove' else "add anchor")
         # Refresh hover after mutating anchors so the overlay stays accurate.
         self._update_hover(x, y, viewport)
         viewport.update()

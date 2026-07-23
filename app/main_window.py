@@ -43,6 +43,7 @@ from app.user_config import config
 from app.widgets.settings_dialog import SettingsDialog
 from app.commands.replace_cloud_command import ReplaceCloudCommand
 from app.commands.edit_skeleton_command import EditSkeletonCommand
+from app.commands.state_command import StateCommand
 from app.widgets.pcd_selector import PcdSelectorDialog
 from app import settings
 
@@ -437,13 +438,13 @@ class MainWindow(QMainWindow):
 
         self._act_undo = QAction("&Undo", self)
         self._act_undo.setShortcut(QKeySequence.StandardKey.Undo)
-        self._act_undo.triggered.connect(self._undo_stack.undo)
+        self._act_undo.triggered.connect(self._do_undo)
         self._act_undo.setEnabled(False)
         edit_menu.addAction(self._act_undo)
 
         self._act_redo = QAction("&Redo", self)
         self._act_redo.setShortcut(QKeySequence.StandardKey.Redo)
-        self._act_redo.triggered.connect(self._undo_stack.redo)
+        self._act_redo.triggered.connect(self._do_redo)
         self._act_redo.setEnabled(False)
         edit_menu.addAction(self._act_redo)
 
@@ -595,21 +596,6 @@ class MainWindow(QMainWindow):
 
     # ── Active-cloud helpers ──────────────────────────────────────────────────
 
-    def _apply_active_cloud(self, pc: PointCloud) -> None:
-        """
-        Swap `pc` in as the active cloud (self._pc + the correct primary/secondary
-        slot) and reload the viewport renderer.  Used by ReplaceCloudCommand.
-        """
-        self._pc = pc
-        if self._editing_secondary:
-            self._pc_secondary = pc
-        else:
-            self._pc_primary = pc
-        self._viewport.reload_point_cloud(pc)
-        self._status.update_point_cloud(pc)
-        # Update reference overlay to reflect the now-active cloud's counterpart
-        self._refresh_reference_overlay()
-
     def _refresh_reference_overlay(self) -> None:
         """Reload the reference overlay to match the current two-cloud state."""
         if self._editing_secondary and self._pc_primary is not None:
@@ -618,6 +604,30 @@ class MainWindow(QMainWindow):
             self._viewport.load_reference(
                 self._pc_secondary, transform=self._secondary_alignment_T
             )
+
+    def _apply_cloud(self, pc, target: str) -> None:
+        """Install `pc` as the primary or secondary cloud and refresh rendering.
+
+        The target ('primary'/'secondary') is fixed at command-creation time, so
+        undo/redo replays onto the correct cloud even after a Primary↔Secondary
+        switch. If the target is the active cloud it goes to the main renderer;
+        otherwise it refreshes the reference overlay.
+        """
+        if target == 'primary':
+            self._pc_primary = pc
+        else:
+            self._pc_secondary = pc
+        active_target = 'secondary' if self._editing_secondary else 'primary'
+        if target == active_target:
+            self._pc = pc
+            self._viewport.reload_point_cloud(pc)
+            self._status.update_point_cloud(pc)
+        elif pc is None:
+            self._viewport.clear_reference()
+        else:
+            transform = (self._secondary_alignment_T if target == 'secondary'
+                         else None)
+            self._viewport.load_reference(pc, transform=transform)
 
     # ── Downsample action ─────────────────────────────────────────────────────
 
@@ -642,7 +652,10 @@ class MainWindow(QMainWindow):
         self._graph_panel.set_ds_stats(n_before, n_after)
 
         old_pc = self._pc
-        cmd = ReplaceCloudCommand(old_pc, new_pc, self._apply_active_cloud, "downsample")
+        target = 'secondary' if self._editing_secondary else 'primary'
+        cmd = ReplaceCloudCommand(old_pc, new_pc,
+                                  lambda pc: self._apply_cloud(pc, target),
+                                  "downsample")
         self._undo_stack.push(cmd)
         self._graph_panel.set_ds_stats(n_before, n_after)
 
@@ -1146,9 +1159,9 @@ class MainWindow(QMainWindow):
                 self._pc_secondary, transform=self._secondary_alignment_T
             )
 
-        # Clear undo history — history from the other cloud isn't applicable
-        self._undo_stack._undo.clear()
-        self._undo_stack._redo.clear()
+        # Undo history is preserved across the switch: cloud commands now carry
+        # their target ('primary'/'secondary') so they replay onto the right cloud
+        # regardless of which is active.
         self._update_undo_actions()
         self._status.update_point_cloud(self._pc)
         self._merge_panel.set_editing_state(self._editing_secondary)
@@ -1176,6 +1189,72 @@ class MainWindow(QMainWindow):
 
         self._viewport.clear_reference()
         self._merge_panel.clear_secondary_status()
+
+    # ── Undoable alignment + anchor state ─────────────────────────────────────
+
+    def _manual_align_tool(self):
+        return self._viewport.tool_manager._tools.get('manual_align')
+
+    def _apply_alignment(self, T) -> None:
+        """Install a secondary-alignment transform and re-sync the viewport. Used
+        as the apply_fn for the undoable ICP/WebMerge alignment command."""
+        self._secondary_alignment_T = np.asarray(T, dtype=np.float32).copy()
+        self._merge_panel.reset_transform_spinboxes()
+        # Write to whichever slot currently draws the secondary.
+        if self._editing_secondary:
+            self._viewport.update_active_transform(self._secondary_alignment_T)
+        else:
+            self._viewport.update_reference_transform(self._secondary_alignment_T)
+        self._viewport.update()
+
+    def _push_alignment(self, old_T, new_T, description: str) -> None:
+        """Record an alignment change on the undo stack. Call AFTER any active-cloud
+        switch so the command isn't wiped by the switch clearing history."""
+        cmd = StateCommand(self._apply_alignment,
+                           np.asarray(old_T, dtype=np.float32).copy(),
+                           np.asarray(new_T, dtype=np.float32).copy(),
+                           description)
+        self._undo_stack.push(cmd)
+
+    def _anchor_state(self, tool):
+        """Snapshot the manual-align tool's anchor/pair state (deep copy)."""
+        return (
+            None if tool.primary_anchors is None else tool.primary_anchors.copy(),
+            None if tool.secondary_anchors is None else tool.secondary_anchors.copy(),
+            list(tool.pairs),
+        )
+
+    def _apply_anchor_state(self, state) -> None:
+        """Install a snapshotted anchor/pair state and refresh labels + overlay."""
+        tool = self._manual_align_tool()
+        if tool is None:
+            return
+        pa, sa, pairs = state
+        tool.primary_anchors = None if pa is None else pa.copy()
+        tool.secondary_anchors = None if sa is None else sa.copy()
+        tool.pairs = list(pairs)
+        tool.active_selection = None
+        tool.hover = None
+        n_p = 0 if tool.primary_anchors is None else len(tool.primary_anchors)
+        n_s = 0 if tool.secondary_anchors is None else len(tool.secondary_anchors)
+        self.on_manual_anchors_changed(n_p, n_s, len(tool.pairs))
+        self._viewport.update()
+
+    def snapshot_anchor_state(self):
+        """Public hook: the manual-align tool calls this before mutating anchors."""
+        tool = self._manual_align_tool()
+        return None if tool is None else self._anchor_state(tool)
+
+    def commit_anchor_edit(self, old_state, description: str) -> None:
+        """Public hook: the tool calls this after a mutation to record it for undo.
+        The mutation has already happened; execute() re-applies the same new state
+        (idempotent) and the command lands on the stack for undo."""
+        tool = self._manual_align_tool()
+        if tool is None or old_state is None:
+            return
+        new_state = self._anchor_state(tool)
+        cmd = StateCommand(self._apply_anchor_state, old_state, new_state, description)
+        self._undo_stack.push(cmd)
 
     def _on_manual_transform_changed(
         self, tx: float, ty: float, tz: float,
@@ -1205,6 +1284,7 @@ class MainWindow(QMainWindow):
         secondary_pos = self._pc_secondary.positions[self._pc_secondary.alive_mask]
 
         max_iter = self._merge_panel.get_icp_max_iter()
+        old_T = self._secondary_alignment_T.copy()
 
         try:
             T, rmse, n_inliers = webmerge_align(
@@ -1228,6 +1308,9 @@ class MainWindow(QMainWindow):
             self._switch_active_cloud()   # → primary active, secondary as aligned overlay
         else:
             self._viewport.update_reference_transform(T)
+
+        # Record for undo AFTER the switch (which clears history) so it survives.
+        self._push_alignment(old_T, T, "ICP alignment")
 
     def _run_webmerge(self) -> None:
         if self._pc_primary is None or self._pc_secondary is None:
@@ -1253,6 +1336,7 @@ class MainWindow(QMainWindow):
         self._wm_thread.start()
 
     def _on_webmerge_finished(self, T: np.ndarray, rmse: float, n_inliers: int) -> None:
+        old_T = self._secondary_alignment_T.copy()
         self._secondary_alignment_T = T
         self._merge_panel.reset_transform_spinboxes()
         self._merge_panel.set_icp_result(rmse, n_inliers)
@@ -1262,6 +1346,8 @@ class MainWindow(QMainWindow):
             self._switch_active_cloud()
         else:
             self._viewport.update_reference_transform(T)
+
+        self._push_alignment(old_T, T, "WebMerge alignment")
 
     def _on_webmerge_error(self, msg: str) -> None:
         QMessageBox.critical(self, "WebMerge Error", f"Pipeline failed:\n{msg}")
@@ -1308,9 +1394,11 @@ class MainWindow(QMainWindow):
                 f"Forget all {n} anchors and {len(tool.pairs)} pairings?"
         ) != QMessageBox.StandardButton.Yes:
             return
+        old_state = self.snapshot_anchor_state()
         tool.clear_anchors()
         self.on_manual_anchors_changed(0, 0, 0)
         self._viewport.update()
+        self.commit_anchor_edit(old_state, "clear anchors")
 
     def _on_regen_anchors(self) -> None:
         """Re-sample the automatic candidate anchors, keeping manual picks/pairs."""
@@ -1323,6 +1411,7 @@ class MainWindow(QMainWindow):
         tool = self._viewport.tool_manager._tools.get('manual_align')
         if tool is None:
             return
+        old_state = self.snapshot_anchor_state()
         tool.ensure_anchor_arrays()
         p_anchors, s_anchors = self._generate_candidate_anchors()
         tool.merge_anchors(p_anchors, s_anchors)
@@ -1331,6 +1420,7 @@ class MainWindow(QMainWindow):
                                        len(tool.secondary_anchors),
                                        len(tool.pairs))
         self._viewport.update()
+        self.commit_anchor_edit(old_state, "regenerate auto anchors")
 
     def _generate_candidate_anchors(self):
         """FPS-sample candidate anchors on both webs for the pairing workflow."""
@@ -1556,9 +1646,11 @@ class MainWindow(QMainWindow):
             tool.secondary_anchors = np.empty((0, 3), dtype=np.float32)
             
         # Add to tool anchors (but DO NOT pair them, let the user decide)
+        old_state = self.snapshot_anchor_state()
         tool.primary_anchors = np.vstack((tool.primary_anchors, best_p))
         tool.secondary_anchors = np.vstack((tool.secondary_anchors, best_s))
-        
+        self.commit_anchor_edit(old_state, "auto-match anchors")
+
         # Switch the active tool back to manual_align so they are visible
         self._viewport.tool_manager.set_tool('manual_align')
         
@@ -1644,8 +1736,14 @@ class MainWindow(QMainWindow):
         all_colors = np.concatenate([pri_colors, sec_colors], axis=0)
         merged_pc  = PointCloud(all_pos, all_colors)
 
-        # Clear secondary state before the replacement so that _apply_active_cloud
-        # (called by execute()) sees no secondary and updates _pc_primary correctly.
+        # Merge is a consolidation checkpoint: it consumes the secondary, so
+        # earlier two-cloud edits (which may target the now-gone secondary) can't
+        # be replayed safely. Commit them by dropping history before the merge.
+        self._undo_stack._undo.clear()
+        self._undo_stack._redo.clear()
+
+        # Clear secondary state before the replacement so that the applied cloud
+        # (via execute()) sees no secondary and updates _pc_primary correctly.
         old_primary = self._pc_primary
         self._pc_secondary = None
         self._secondary_alignment_T = np.eye(4, dtype=np.float32)
@@ -1658,8 +1756,9 @@ class MainWindow(QMainWindow):
         self._viewport.update_active_transform(np.eye(4, dtype=np.float32))
         self._merge_panel.clear_secondary_status()
 
-        # Push: execute() calls _apply_active_cloud(merged_pc)
-        cmd = ReplaceCloudCommand(old_primary, merged_pc, self._apply_active_cloud, "merge")
+        # Push: execute() installs merged_pc as the primary cloud.
+        cmd = ReplaceCloudCommand(old_primary, merged_pc,
+                                  lambda pc: self._apply_cloud(pc, 'primary'), "merge")
         self._undo_stack.push(cmd)
 
     def _apply_skeleton_from_command(self, skeleton) -> None:
@@ -1755,6 +1854,29 @@ class MainWindow(QMainWindow):
         if self._pc:
             self._status.update_point_cloud(self._pc)
         self._update_undo_actions()
+
+    def _do_undo(self) -> None:
+        """Undo the last command and flash which one in the status bar."""
+        if not self._undo_stack.can_undo:
+            self._status.showMessage("Nothing to undo", 1500)
+            return
+        desc = self._undo_stack.undo_description or "last action"
+        self._undo_stack.undo()
+        # A command may have edited the cloud that is currently the reference
+        # overlay (e.g. an edit undone after switching); refresh it so the change
+        # is visible without waiting for a switch-back.
+        self._refresh_reference_overlay()
+        self._status.showMessage(f"Undone: {desc}", 2500)
+
+    def _do_redo(self) -> None:
+        """Redo the last undone command and flash which one in the status bar."""
+        if not self._undo_stack.can_redo:
+            self._status.showMessage("Nothing to redo", 1500)
+            return
+        desc = self._undo_stack.redo_description or "last action"
+        self._undo_stack.redo()
+        self._refresh_reference_overlay()
+        self._status.showMessage(f"Redone: {desc}", 2500)
 
     def _update_undo_actions(self) -> None:
         self._act_undo.setEnabled(self._undo_stack.can_undo)
