@@ -66,7 +66,9 @@ class GLViewport(QOpenGLWidget):
         # Skeleton edit mode state
         self.skeleton_edit_mode: bool = False
         self._skel_nodes: np.ndarray | None = None      # (M, 3) CPU copy of skeleton nodes
-        self._skel_selection: np.ndarray | None = None  # (M,) bool mask
+        self._skel_edges: np.ndarray | None = None       # (E, 2) CPU copy of skeleton edges
+        self._skel_selection: np.ndarray | None = None  # (M,) bool node mask
+        self._skel_edge_selection: np.ndarray | None = None  # (E,) bool edge mask
         self._home_position     = np.array([0.0, 0.0, 5.0], dtype=np.float32)
         self._home_yaw          = 0.0
         self._home_pitch        = 0.0
@@ -180,6 +182,7 @@ class GLViewport(QOpenGLWidget):
         if self.skeleton_renderer is None:
             return
         self._skel_nodes = graph.nodes.copy() if len(graph.nodes) > 0 else None
+        self._skel_edges = graph.edges.copy() if len(graph.edges) > 0 else None
         first_upload = not (self.skeleton_renderer and self.skeleton_renderer.has_data)
         self.makeCurrent()
         self.skeleton_renderer.upload(graph)
@@ -220,7 +223,9 @@ class GLViewport(QOpenGLWidget):
         if self.skeleton_renderer:
             self.skeleton_renderer.clear()
         self._skel_nodes = None
+        self._skel_edges = None
         self._skel_selection = None
+        self._skel_edge_selection = None
         self.update()
 
     # ── skeleton edit mode ────────────────────────────────────────────────────
@@ -232,10 +237,13 @@ class GLViewport(QOpenGLWidget):
         return self.has_point_cloud()
 
     def reset_skel_selection(self) -> None:
-        """Allocate/reset the skeleton selection mask to all-False."""
+        """Allocate/reset the skeleton node + edge selection masks to all-False."""
         n = len(self._skel_nodes) if self._skel_nodes is not None else 0
         self._skel_selection = np.zeros(n, dtype=bool) if n > 0 else None
+        n_e = len(self._skel_edges) if self._skel_edges is not None else 0
+        self._skel_edge_selection = np.zeros(n_e, dtype=bool) if n_e > 0 else None
         self._upload_skel_selection()
+        self._upload_skel_edge_selection()
         self.skel_selection_changed.emit()
 
     def _upload_skel_selection(self) -> None:
@@ -245,6 +253,82 @@ class GLViewport(QOpenGLWidget):
         self.skeleton_renderer.upload_selection(self._skel_selection)
         self.doneCurrent()
         self.update()
+
+    def _upload_skel_edge_selection(self) -> None:
+        """Push the selected edges' node-index pairs to the renderer for highlight."""
+        if self.skeleton_renderer is None:
+            return
+        if (self._skel_edge_selection is None or self._skel_edges is None
+                or not self._skel_edge_selection.any()):
+            rows = np.empty((0, 2), dtype=np.uint32)
+        else:
+            rows = self._skel_edges[self._skel_edge_selection].astype(np.uint32)
+        self.makeCurrent()
+        self.skeleton_renderer.upload_edge_selection(rows)
+        self.doneCurrent()
+        self.update()
+
+    def _project_all_skeleton_nodes(self) -> tuple[np.ndarray, np.ndarray]:
+        """Project every skeleton node to screen coords, keeping array alignment.
+
+        Returns (screen_xy (N,2), visible (N,) bool). Invisible (behind-camera)
+        rows hold (0, 0) and must be masked out via `visible`.
+        """
+        nodes = self._skel_nodes
+        if nodes is None or len(nodes) == 0:
+            return np.empty((0, 2), dtype=np.float32), np.empty(0, dtype=bool)
+        mvp = self.camera.get_mvp_matrix()
+        ones = np.ones((len(nodes), 1), dtype=np.float32)
+        clip = np.concatenate([nodes.astype(np.float32), ones], axis=1) @ mvp.T.astype(np.float32)
+        w = clip[:, 3]
+        visible = w > 0.0
+        screen = np.zeros((len(nodes), 2), dtype=np.float32)
+        if np.any(visible):
+            ndc = clip[visible, :3] / clip[visible, 3:4]
+            W, H = float(self.width()), float(self.height())
+            screen[visible, 0] = (ndc[:, 0] + 1.0) * 0.5 * W
+            screen[visible, 1] = (1.0 - ndc[:, 1]) * 0.5 * H
+        return screen, visible
+
+    def _clear_skel_edge_selection(self) -> None:
+        if self._skel_edge_selection is not None:
+            self._skel_edge_selection[:] = False
+
+    def _skel_node_screen(self, idx: int) -> tuple[float, float]:
+        """Screen coords of a single skeleton node (used to break node-vs-edge ties)."""
+        screen, visible = self._project_all_skeleton_nodes()
+        if idx < 0 or idx >= len(screen) or not visible[idx]:
+            return (-1e6, -1e6)
+        return float(screen[idx, 0]), float(screen[idx, 1])
+
+    def _pick_skeleton_edge(self, x: int, y: int, radius: float = 8.0):
+        """Return (edge_index, dist2) of the nearest skeleton edge within `radius`
+        screen pixels, or (-1, inf). Distance is point-to-segment in screen space."""
+        if self._skel_edges is None or len(self._skel_edges) == 0:
+            return -1, float('inf')
+        screen, visible = self._project_all_skeleton_nodes()
+        if len(screen) == 0:
+            return -1, float('inf')
+        edges = self._skel_edges
+        both_vis = visible[edges[:, 0]] & visible[edges[:, 1]]
+        if not np.any(both_vis):
+            return -1, float('inf')
+        a = screen[edges[:, 0]]          # (E,2) segment start
+        b = screen[edges[:, 1]]          # (E,2) segment end
+        p = np.array([x, y], dtype=np.float32)
+        ab = b - a
+        ap = p - a
+        denom = np.einsum('ij,ij->i', ab, ab)
+        t = np.where(denom > 1e-9, np.einsum('ij,ij->i', ap, ab) / np.maximum(denom, 1e-9), 0.0)
+        t = np.clip(t, 0.0, 1.0)
+        closest = a + t[:, None] * ab
+        d = closest - p
+        dist2 = np.einsum('ij,ij->i', d, d)
+        dist2[~both_vis] = np.inf
+        nearest = int(dist2.argmin())
+        if dist2[nearest] <= radius * radius:
+            return nearest, float(dist2[nearest])
+        return -1, float('inf')
 
     def screen_project_skeleton_nodes(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -292,16 +376,33 @@ class GLViewport(QOpenGLWidget):
         if self.skeleton_edit_mode:
             if self._skel_selection is None:
                 return
-            idx = self._pick_skeleton_node(x, y)
-            if idx >= 0:
-                if add:
-                    self._skel_selection[idx] = not self._skel_selection[idx]
-                else:
+            # A click hits a node or an edge; the closer one (in screen pixels)
+            # wins. Nodes sit ON edges, so a node's tighter radius makes clicking
+            # a vertex prefer the node, while clicking mid-span selects the edge.
+            node_idx = self._pick_skeleton_node(x, y)
+            edge_idx, edge_d2 = self._pick_skeleton_edge(x, y)
+            node_d2 = float('inf')
+            if node_idx >= 0:
+                sx, sy = self._skel_node_screen(node_idx)
+                node_d2 = (sx - x) ** 2 + (sy - y) ** 2
+
+            if node_idx >= 0 and node_d2 <= edge_d2:
+                if not add:
                     self._skel_selection[:] = False
-                    self._skel_selection[idx] = True
+                    self._clear_skel_edge_selection()
+                self._skel_selection[node_idx] = (True if not add
+                                                  else not self._skel_selection[node_idx])
+            elif edge_idx >= 0 and self._skel_edge_selection is not None:
+                if not add:
+                    self._skel_selection[:] = False
+                    self._skel_edge_selection[:] = False
+                self._skel_edge_selection[edge_idx] = (True if not add
+                                                       else not self._skel_edge_selection[edge_idx])
             elif not add:
                 self._skel_selection[:] = False
+                self._clear_skel_edge_selection()
             self._upload_skel_selection()
+            self._upload_skel_edge_selection()
             self.skel_selection_changed.emit()
         else:
             if not self.has_point_cloud():

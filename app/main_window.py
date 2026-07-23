@@ -370,6 +370,7 @@ class MainWindow(QMainWindow):
         self._skel_editor.deselect_all_clicked.connect(self._skel_deselect_all)
         self._skel_editor.select_by_degree_clicked.connect(self._skel_select_by_degree)
         self._skel_editor.reextract_clicked.connect(self._reextract_selected_skel_nodes)
+        self._skel_editor.remove_edge_clicked.connect(self._remove_selected_skel_edges)
         self._skel_editor.delete_nodes_clicked.connect(self._delete_selected_skel_nodes)
         self._skel_editor.smooth_clicked.connect(self._smooth_selected_skel_nodes)
         self._skel_editor.simplify_chains_clicked.connect(self._refine_simplify_chains)
@@ -980,6 +981,76 @@ class MainWindow(QMainWindow):
         )
         cmd = EditSkeletonCommand(old_skeleton, new_skeleton, self._set_skeleton,
                                   "Re-extract skeleton connectivity")
+        self._undo_stack.push(cmd)
+        self._viewport.reset_skel_selection()
+
+    def _remove_selected_skel_edges(self) -> None:
+        """Delete edges whose both endpoints are selected. Two selected nodes cut
+        the edge between them; a selected cluster removes all its internal edges.
+        Nodes are kept (inverse of Re-extract)."""
+        if self._skeleton is None or self._viewport._skel_selection is None:
+            return
+        selected_idx = np.where(self._viewport._skel_selection)[0]
+        if len(selected_idx) < 2:
+            QMessageBox.warning(self, "Select two nodes",
+                                "Select at least 2 skeleton nodes; the edge(s) "
+                                "between them will be removed.")
+            return
+
+        selected_set = set(selected_idx.tolist())
+        kept_edges = [(int(u), int(v)) for u, v in self._skeleton.edges
+                      if not (u in selected_set and v in selected_set)]
+        removed = len(self._skeleton.edges) - len(kept_edges)
+        if removed == 0:
+            QMessageBox.information(self, "No edge to remove",
+                                    "No edge connects the selected nodes.")
+            return
+
+        edges_arr = (np.array(kept_edges, dtype=np.int32) if kept_edges
+                     else np.empty((0, 2), dtype=np.int32))
+        new_skeleton = StrandGraph(nodes=self._skeleton.nodes.copy(), edges=edges_arr)
+        cmd = EditSkeletonCommand(self._skeleton, new_skeleton, self._set_skeleton,
+                                  f"Remove {removed} skeleton edge(s)")
+        self._undo_stack.push(cmd)
+        self._viewport.reset_skel_selection()
+
+    def _delete_skel_selection(self) -> None:
+        """Delete the current skeleton selection: any clicked edges plus any
+        selected nodes (and their incident edges), in one undoable step. Bound to
+        the Delete hotkey so clicking an edge then pressing Delete removes it."""
+        if self._skeleton is None:
+            return
+        node_mask = self._viewport._skel_selection
+        edge_mask = self._viewport._skel_edge_selection
+        sel_nodes = set(np.where(node_mask)[0].tolist()) if node_mask is not None else set()
+        sel_edges = set(np.where(edge_mask)[0].tolist()) if edge_mask is not None else set()
+        if not sel_nodes and not sel_edges:
+            return
+
+        # Remove selected nodes → renumber survivors; else keep all nodes.
+        if sel_nodes:
+            kept_idx = np.where(~node_mask)[0]
+            if len(kept_idx) == 0:
+                self._clear_skeleton()
+                return
+            remap = {int(old): new for new, old in enumerate(kept_idx)}
+            new_nodes = self._skeleton.nodes[kept_idx]
+        else:
+            remap = {i: i for i in range(len(self._skeleton.nodes))}
+            new_nodes = self._skeleton.nodes.copy()
+
+        new_edges_list = [
+            (remap[int(u)], remap[int(v)])
+            for e_i, (u, v) in enumerate(self._skeleton.edges)
+            if e_i not in sel_edges
+            and int(u) not in sel_nodes and int(v) not in sel_nodes
+        ]
+        new_edges = (np.array(new_edges_list, dtype=np.int32) if new_edges_list
+                     else np.empty((0, 2), dtype=np.int32))
+
+        new_skeleton = StrandGraph(nodes=new_nodes, edges=new_edges)
+        cmd = EditSkeletonCommand(self._skeleton, new_skeleton, self._set_skeleton,
+                                  "Delete skeleton selection")
         self._undo_stack.push(cmd)
         self._viewport.reset_skel_selection()
 
@@ -1736,7 +1807,7 @@ class MainWindow(QMainWindow):
             # Delete key always deletes; the configured key is an extra binding.
             if key == int(Qt.Key.Key_Delete) or (self._hk_delete is not None and key == self._hk_delete):
                 if self._viewport.skeleton_edit_mode:
-                    self._delete_selected_skel_nodes()
+                    self._delete_skel_selection()
                 else:
                     self._delete_selected()
                 return True

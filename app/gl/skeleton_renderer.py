@@ -32,6 +32,11 @@ class SkeletonRenderer:
         self._vbo_edge_pos: int | None = None
         self._ebo_edges: int | None = None
 
+        # Selected-edge highlight: separate EBO/VAO sharing the edge position VBO
+        self._vao_edges_sel: int | None = None
+        self._ebo_edges_sel: int | None = None
+        self._n_edge_sel_indices: int = 0
+
         # Node VAO: position VBO + selection flag VBO for GL_POINTS
         self._vao_nodes: int | None = None
         self._vbo_node_pos: int | None = None
@@ -78,6 +83,18 @@ class SkeletonRenderer:
         glBindVertexArray(0)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
+        # ── Selected-edge VAO (shares the edge position VBO, own EBO) ─────────
+        self._vao_edges_sel = glGenVertexArrays(1)
+        self._ebo_edges_sel = glGenBuffers(1)
+        self._n_edge_sel_indices = 0
+        glBindVertexArray(self._vao_edges_sel)
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_edge_pos)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
+        glEnableVertexAttribArray(0)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self._ebo_edges_sel)
+        glBindVertexArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
         # ── Node VAO ──────────────────────────────────────────────────────────
         self._vao_nodes = glGenVertexArrays(1)
         self._vbo_node_pos, self._vbo_node_sel = glGenBuffers(2)
@@ -107,6 +124,18 @@ class SkeletonRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self._vbo_node_sel)
         glBufferSubData(GL_ARRAY_BUFFER, 0, data.nbytes, data)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    def upload_edge_selection(self, edge_rows: np.ndarray) -> None:
+        """Update highlighted edges. `edge_rows` is a (K,2) uint32 array of node
+        index pairs (into the shared edge position VBO)."""
+        if self._ebo_edges_sel is None:
+            return
+        rows = np.ascontiguousarray(edge_rows, dtype=np.uint32).reshape(-1, 2)
+        self._n_edge_sel_indices = rows.size
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self._ebo_edges_sel)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, rows.nbytes, rows if rows.size else None,
+                     GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 
     def draw(self, mvp: np.ndarray) -> None:
         if self._program is None or self._n_nodes == 0:
@@ -149,6 +178,20 @@ class SkeletonRenderer:
             glDrawElements(GL_LINES, self._n_edge_indices, GL_UNSIGNED_INT, None)
             glBindVertexArray(0)
 
+        # Selected edges (highlight, drawn thicker on top)
+        if self._n_edge_sel_indices > 0:
+            glUniform4f(loc_color, *self.selected_color)
+            glUniform1f(loc_size, 1.0)
+            glUniform1i(loc_round, 0)
+            try:
+                from OpenGL.GL import glLineWidth
+                glLineWidth(max(self.line_width * 2.5, 3.0))
+            except Exception:
+                pass
+            glBindVertexArray(self._vao_edges_sel)
+            glDrawElements(GL_LINES, self._n_edge_sel_indices, GL_UNSIGNED_INT, None)
+            glBindVertexArray(0)
+
         # Nodes
         glUniform4f(loc_color, *self.node_color)
         glUniform1f(loc_size, self.node_size)
@@ -163,6 +206,7 @@ class SkeletonRenderer:
     def clear(self) -> None:
         self._n_nodes = 0
         self._n_edge_indices = 0
+        self._n_edge_sel_indices = 0
 
     @property
     def has_data(self) -> bool:
@@ -177,6 +221,11 @@ class SkeletonRenderer:
             glDeleteBuffers(1, [self._vbo_edge_pos]); self._vbo_edge_pos = None
         if self._ebo_edges is not None:
             glDeleteBuffers(1, [self._ebo_edges]); self._ebo_edges = None
+        if self._vao_edges_sel is not None:
+            glDeleteVertexArrays(1, [self._vao_edges_sel]); self._vao_edges_sel = None
+        if self._ebo_edges_sel is not None:
+            glDeleteBuffers(1, [self._ebo_edges_sel]); self._ebo_edges_sel = None
+        self._n_edge_sel_indices = 0
         if self._vao_nodes is not None:
             glDeleteVertexArrays(1, [self._vao_nodes]); self._vao_nodes = None
         if self._vbo_node_pos is not None:

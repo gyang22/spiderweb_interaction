@@ -16,6 +16,7 @@ class SkeletonEditorPanel(QDockWidget):
     deselect_all_clicked   = pyqtSignal()
     select_by_degree_clicked = pyqtSignal(int)
     reextract_clicked      = pyqtSignal()
+    remove_edge_clicked    = pyqtSignal()
     delete_nodes_clicked   = pyqtSignal()
     smooth_clicked         = pyqtSignal(float)
     simplify_chains_clicked    = pyqtSignal()
@@ -123,6 +124,16 @@ class SkeletonEditorPanel(QDockWidget):
         )
         self._btn_reextract.clicked.connect(self.reextract_clicked)
         reex_layout.addWidget(self._btn_reextract)
+
+        self._btn_remove_edge = QPushButton("Remove Edge(s) Between Selected")
+        self._btn_remove_edge.setFixedHeight(30)
+        self._btn_remove_edge.setToolTip(
+            "Delete edges whose BOTH endpoints are selected. Select two nodes\n"
+            "to cut the edge between them (inverse of Re-extract); select a\n"
+            "cluster to remove all edges inside it. Nodes are kept."
+        )
+        self._btn_remove_edge.clicked.connect(self.remove_edge_clicked)
+        reex_layout.addWidget(self._btn_remove_edge)
 
         layout.addWidget(reex_group)
 
@@ -317,7 +328,8 @@ class SkeletonEditorPanel(QDockWidget):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for w in (self._btn_sel_all, self._btn_desel, self._btn_sel_degree,
-                  self._btn_reextract, self._btn_delete, self._btn_smooth,
+                  self._btn_reextract, self._btn_remove_edge,
+                  self._btn_delete, self._btn_smooth,
                   self._btn_simplify, self._btn_prune, self._btn_collapse,
                   self._btn_grow_rays, self._btn_beam, self._btn_pipeline):
             w.setEnabled(enabled)
