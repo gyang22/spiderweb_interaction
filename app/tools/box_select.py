@@ -50,7 +50,8 @@ class BoxSelectTool(AbstractTool):
         )
         indices = all_idx[mask]
 
-        add = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        # Alt = add to selection (Shift is taken by the camera "fly down" key).
+        add = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
         viewport.apply_region_selection(indices, add)
 
         self._start = self._end = None

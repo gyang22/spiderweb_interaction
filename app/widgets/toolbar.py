@@ -142,6 +142,7 @@ class ToolBar(QToolBar):
             ("W A S D",   "Fly camera"),
             ("Space",     "Fly up"),
             ("Shift",     "Fly down"),
+            ("Alt+click", "Add to selection"),
         ]
         for key, desc in _HOTKEYS:
             self.addWidget(_hotkey_row(key, desc))

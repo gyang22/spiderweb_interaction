@@ -10,7 +10,8 @@ class ClickSelectTool(AbstractTool):
             return
         x   = int(event.position().x())
         y   = int(event.position().y())
-        add = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        # Alt = add to selection (Shift is taken by the camera "fly down" key).
+        add = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
         viewport.apply_click_selection(x, y, add)
 
     def mouse_move(self, event, viewport) -> None:

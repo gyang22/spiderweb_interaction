@@ -73,7 +73,8 @@ class LassoSelectTool(AbstractTool):
         inside  = _points_in_polygon(screen_xy, poly)
         indices = all_idx[inside]
 
-        add = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        # Alt = add to selection (Shift is taken by the camera "fly down" key).
+        add = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
         viewport.apply_region_selection(indices, add)
 
         self._polygon = []
